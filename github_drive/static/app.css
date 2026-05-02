@@ -868,8 +868,29 @@ input, select {
 
 .archive-browser-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.archive-browser-card {
+  min-width: 0;
+}
+
+.archive-browser-card .archive-thumb {
+  aspect-ratio: 16 / 10;
+}
+
+.archive-browser-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.archive-browser-card-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .archive-node {

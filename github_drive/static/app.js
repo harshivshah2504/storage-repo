@@ -588,20 +588,24 @@ function renderArchiveContents() {
   }
 
   const folderCards = folders.map((folder) => `
-    <div class="archive-node folder" data-folder-path="${escapeHtml(folder.path)}">
-      <div class="archive-node-folder-header">
-        <div class="archive-node-icon">${FOLDER_ICON_INLINE}</div>
+    <div class="archive-card archive-browser-card folder" data-folder-path="${escapeHtml(folder.path)}">
+      <div class="archive-thumb">
+        <div class="archive-thumb-fallback">${FOLDER_ICON_INLINE}</div>
+        <span class="archive-kind-pill">Folder</span>
+      </div>
+      <div class="archive-body">
+        <div class="archive-name">${escapeHtml(folder.name)}</div>
+        <div class="archive-meta">
+          <span>${folder.fileCount} file${folder.fileCount === 1 ? "" : "s"}</span>
+          ${folder.imageCount ? `<span>${folder.imageCount} image${folder.imageCount === 1 ? "" : "s"}</span>` : ""}
+        </div>
+      </div>
+      <div class="archive-browser-card-actions">
+        <div class="archive-browser-card-hint">Open folder</div>
         <div class="archive-node-actions">
           <button type="button" class="icon-button" data-download-path="${escapeHtml(folder.path)}" data-download-kind="folder" title="Download folder">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
           </button>
-        </div>
-      </div>
-      <div class="archive-node-body">
-        <div class="archive-node-name">${escapeHtml(folder.name)}</div>
-        <div class="archive-node-meta">
-          <span>${folder.fileCount} file${folder.fileCount === 1 ? "" : "s"}</span>
-          ${folder.imageCount ? `<span>${folder.imageCount} image${folder.imageCount === 1 ? "" : "s"}</span>` : ""}
         </div>
       </div>
     </div>
@@ -623,20 +627,23 @@ function renderArchiveContents() {
       `
       : "";
     return `
-      <div class="archive-node file" data-file-path="${escapeHtml(file.relative_path)}" data-previewable="${previewable ? "1" : "0"}">
-        <div class="archive-node-thumb">${thumb}</div>
-        <div class="archive-node-body">
-          <div class="archive-node-name">${escapeHtml(basename(file.relative_path))}</div>
-          <div class="archive-node-meta">
+      <div class="archive-card archive-browser-card file" data-file-path="${escapeHtml(file.relative_path)}" data-previewable="${previewable ? "1" : "0"}">
+        <div class="archive-thumb">${thumb}<span class="archive-kind-pill">${escapeHtml(KIND_LABEL[file.kind] || "File")}</span></div>
+        <div class="archive-body">
+          <div class="archive-name">${escapeHtml(basename(file.relative_path))}</div>
+          <div class="archive-meta">
             <span>${escapeHtml(KIND_LABEL[file.kind] || "File")}</span>
             <span>${escapeHtml(formatBytes(file.original_size || 0))}</span>
           </div>
         </div>
-        <div class="archive-node-actions">
-          <button type="button" class="icon-button" data-download-path="${escapeHtml(file.relative_path)}" data-download-kind="file" title="Download file">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
-          </button>
-          ${deleteButton}
+        <div class="archive-browser-card-actions">
+          <div class="archive-browser-card-hint">${previewable ? "Preview image" : "File"}</div>
+          <div class="archive-node-actions">
+            <button type="button" class="icon-button" data-download-path="${escapeHtml(file.relative_path)}" data-download-kind="file" title="Download file">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
+            </button>
+            ${deleteButton}
+          </div>
         </div>
       </div>
     `;
@@ -669,12 +676,12 @@ function renderArchiveContents() {
       await deleteArchiveEntry(button.dataset.deletePath || "");
     });
   });
-  grid.querySelectorAll(".archive-node-thumb img").forEach((img) => {
+  grid.querySelectorAll(".archive-thumb img").forEach((img) => {
     img.addEventListener("error", () => {
       const filePath = img.closest("[data-file-path]")?.dataset.filePath || "";
       const entry = (contents.entries || []).find((item) => item.relative_path === filePath);
       const kind = entry?.kind || "other";
-      img.parentElement.innerHTML = `<div class="archive-node-icon">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
+      img.parentElement.innerHTML = `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div><span class="archive-kind-pill">${escapeHtml(KIND_LABEL[kind] || "File")}</span>`;
     });
   });
 }
