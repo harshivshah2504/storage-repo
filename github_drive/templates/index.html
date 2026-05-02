@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GitHub Drive</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ asset_version }}">
+  </head>
+  <body>
+    <main class="app">
+
+      <header class="topbar">
+        <div>
+          <h1>GitHub Drive</h1>
+          <p class="subtle">Upload and download arbitrary files as GitHub Release archives.</p>
+        </div>
+        <div class="auth-box">
+          <div id="userBadge" class="subtle small">Signed in as <strong>{{ username }}</strong></div>
+          <div id="repoBadge" class="subtle small">Checking GitHub repo...</div>
+          <div class="auth-actions">
+            <button type="button" id="configureCredsButton" class="btn-outline btn-sm">Configure</button>
+            <form method="post" action="{{ url_for('logout') }}" style="display:inline">
+              <button type="submit" class="btn-outline btn-sm">Sign out</button>
+            </form>
+          </div>
+        </div>
+      </header>
+
+      <section id="credsCard" class="card" style="display:none">
+        <h2>GitHub credentials</h2>
+        <p class="subtle small">
+          Each account uses its own GitHub Personal Access Token and target repository.
+          Create a PAT at
+          <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer">github.com/settings/tokens</a>
+          with the <code>repo</code> scope.
+        </p>
+        <form id="credsForm" class="download-form">
+          <label class="field-full">
+            <span>Personal Access Token</span>
+            <input type="password" name="token" placeholder="ghp_... or github_pat_..." required autocomplete="off">
+          </label>
+          <label class="field-full">
+            <span>Target repository <span class="subtle">(owner/repo)</span></span>
+            <input type="text" name="repo" placeholder="your-username/github-drive-archives" required>
+          </label>
+          <div class="form-footer field-full">
+            <label class="checkbox-label">
+              <input type="checkbox" name="create_repo">
+              <span>Create the repository if it does not exist (private)</span>
+            </label>
+            <div>
+              <button type="button" id="clearCredsButton" class="btn-outline btn-sm">Forget</button>
+              <button type="submit">Save Credentials</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section id="uploadCard" class="card" style="display:none">
+        <h2>Upload</h2>
+        <div class="picker-bar">
+          <button type="button" id="pickFilesButton">Pick Files</button>
+          <button type="button" id="pickFolderButton">Pick Folder</button>
+          <span id="uploadSelectionSummary" class="selection-label">No files selected</span>
+          <input type="file" id="filePicker" multiple hidden>
+          <input type="file" id="folderPicker" webkitdirectory directory multiple hidden>
+        </div>
+        <form id="uploadForm" class="options-row">
+          <label>
+            <span>Mode</span>
+            <select name="upload_mode">
+              <option value="auto" selected>Auto</option>
+              <option value="files">Per-file assets</option>
+              <option value="bundle">Bundle first</option>
+            </select>
+          </label>
+          <label>
+            <span>Workers</span>
+            <input type="number" name="workers" min="1" max="8" value="4">
+          </label>
+          <label>
+            <span>Resume tag</span>
+            <input type="text" name="resume_tag" placeholder="Optional existing tag">
+          </label>
+          <label class="checkbox-label encrypt-toggle">
+            <input type="checkbox" name="encrypt">
+            <span>Encrypt files before upload</span>
+          </label>
+        </form>
+        <p class="subtle small hint">
+          Auto mode bundles tiny-file-heavy uploads into a ZIP before chunking so you spend far fewer API calls.
+          Add a release tag to resume an interrupted upload into an existing archive.
+        </p>
+      </section>
+
+      <section id="archivesCard" class="card" style="display:none">
+        <div class="section-head">
+          <h2>Your archives</h2>
+          <button id="refreshArchivesButton" type="button" class="btn-outline">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Items</th>
+                <th>Created</th>
+                <th>Tag</th>
+              </tr>
+            </thead>
+            <tbody id="archivesTableBody">
+              <tr><td colspan="4" class="subtle center">Loading archives...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="downloadCard" class="card" style="display:none">
+        <h2>Download</h2>
+        <form id="downloadForm" class="download-form">
+          <label class="field-full">
+            <span>Release tag</span>
+            <input type="text" name="tag" id="selectedTag" placeholder="Click an archive above" required>
+          </label>
+          <label>
+            <span>Workers</span>
+            <input type="number" name="workers" min="1" max="8" value="4">
+          </label>
+          <div class="form-footer field-full">
+            <button type="submit">Download to Computer</button>
+          </div>
+        </form>
+
+        <div id="downloadReadyArea" style="display:none" class="download-ready">
+          <span>Ready to save:</span>
+          <a id="downloadFileLink" href="#" class="btn-primary">Save ZIP to Computer</a>
+        </div>
+      </section>
+
+      <section id="tasksCard" class="card" style="display:none">
+        <h2>Recent Tasks</h2>
+        <div id="tasksList" class="task-list"></div>
+      </section>
+
+    </main>
+    <script src="{{ url_for('static', filename='app.js') }}?v={{ asset_version }}"></script>
+  </body>
+</html>
