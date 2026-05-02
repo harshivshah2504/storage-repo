@@ -224,23 +224,23 @@
           <h2 class="modal-title" id="archiveDetailTitle">Archive</h2>
           <p class="modal-subtitle" id="archiveDetailMeta"></p>
         </div>
-        <div class="modal-body archive-detail-layout">
-          <div class="archive-detail-settings">
-            <div class="field">
-              <span class="field-label">Tag</span>
-              <input class="text-input" type="text" id="archiveDetailTag" readonly>
+        <div class="modal-body archive-detail-body">
+          <div class="archive-browser-toolbar">
+            <div class="archive-breadcrumbs" id="archiveBreadcrumbs"></div>
+            <div class="archive-browser-toolbar-actions">
+              <div class="archive-browser-note" id="archiveBrowserNote"></div>
+              <label class="archive-workers-field">
+                <span>Workers</span>
+                <input class="text-input" type="number" id="downloadWorkers" min="1" max="8" value="4">
+              </label>
+              <button type="button" class="btn btn-outline" id="downloadCurrentFolderButton" style="display:none">Download folder</button>
             </div>
-            <div class="field">
-              <span class="field-label">Concurrent workers</span>
-              <input class="text-input" type="number" id="downloadWorkers" min="1" max="8" value="4">
-            </div>
-            <div class="archive-browser-note" id="archiveBrowserNote"></div>
           </div>
           <div class="archive-browser-panel">
-            <div class="archive-browser-toolbar">
-              <div class="archive-breadcrumbs" id="archiveBreadcrumbs"></div>
+            <div class="archive-browser-status-row">
+              <div class="archive-browser-status" id="archiveBrowserStatus">Loading files…</div>
+              <div class="archive-detail-tag" id="archiveDetailTagText"></div>
             </div>
-            <div class="archive-browser-status" id="archiveBrowserStatus">Loading files…</div>
             <div class="archive-browser-grid" id="archiveBrowserGrid"></div>
           </div>
         </div>
@@ -248,7 +248,7 @@
           <button type="button" class="btn btn-danger" id="archiveDeleteButton">Delete archive</button>
           <a class="btn btn-secondary" id="archiveOpenOnGithub" target="_blank" rel="noreferrer" href="#">View on GitHub</a>
           <button type="button" class="btn btn-secondary" data-close-modal>Close</button>
-          <button type="button" class="btn btn-primary" id="startDownloadButton">Download</button>
+          <button type="button" class="btn btn-primary" id="startDownloadButton">Download archive</button>
         </div>
       </div>
     </div>
