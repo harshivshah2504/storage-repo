@@ -276,6 +276,26 @@ function downloadSelectedEntry(relativePath, kind = "file") {
   window.location.href = archiveEntryDownloadUrl(archive.release_id, relativePath, kind);
 }
 
+function updatePageChrome() {
+  const title = $("pageTitle");
+  const subtitle = $("pageSubtitle");
+  if (!title || !subtitle) return;
+  const archive = state.selectedArchive;
+  if (!archive) {
+    title.textContent = "My Drive";
+    subtitle.textContent = "";
+    return;
+  }
+  const path = normalizeArchivePath(state.selectedArchivePath);
+  const meta = archive.archive || {};
+  const count = meta.total_items || archive.asset_count || 0;
+  const created = formatDate(meta.created_at || archive.created_at || "");
+  title.textContent = path ? basename(path) : archiveTitle(archive);
+  subtitle.textContent = path
+    ? archiveTitle(archive)
+    : `${count} item${count === 1 ? "" : "s"}${created ? ` · ${created}` : ""}`;
+}
+
 function syncArchiveBrowserToolbar() {
   const archive = state.selectedArchive;
   const currentPath = normalizeArchivePath(state.selectedArchivePath);
@@ -367,6 +387,20 @@ function applyFiltersAndSort() {
     return 0;
   });
   state.filteredArchives = result;
+}
+
+function showArchiveListView() {
+  show("filterBar", true);
+  show("archivesContainer", true);
+  show("archiveView", false);
+  updatePageChrome();
+}
+
+function showArchiveBrowserView() {
+  show("filterBar", false);
+  show("archivesContainer", false);
+  show("archiveView", true);
+  updatePageChrome();
 }
 
 function renderArchives() {
@@ -573,11 +607,10 @@ function renderArchiveContents() {
   }
 
   state.selectedArchivePath = normalizeArchivePath(state.selectedArchivePath);
+  updatePageChrome();
   renderArchiveBreadcrumbs();
   syncArchiveBrowserToolbar();
-  note.textContent = contents.supports_file_delete
-    ? "Open folders, preview images, or download any file or folder."
-    : "This archive was bundled for faster upload, so individual file delete is unavailable.";
+  note.textContent = contents.supports_file_delete ? "" : "Bundled archive";
 
   const { folders, files } = listArchiveChildren(contents.entries || [], state.selectedArchivePath);
   status.textContent = `${folders.length + files.length} item${folders.length + files.length === 1 ? "" : "s"} here`;
@@ -601,7 +634,6 @@ function renderArchiveContents() {
         </div>
       </div>
       <div class="archive-browser-card-actions">
-        <div class="archive-browser-card-hint">Open folder</div>
         <div class="archive-node-actions">
           <button type="button" class="icon-button" data-download-path="${escapeHtml(folder.path)}" data-download-kind="folder" title="Download folder">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
@@ -637,7 +669,6 @@ function renderArchiveContents() {
           </div>
         </div>
         <div class="archive-browser-card-actions">
-          <div class="archive-browser-card-hint">${previewable ? "Preview image" : "File"}</div>
           <div class="archive-node-actions">
             <button type="button" class="icon-button" data-download-path="${escapeHtml(file.relative_path)}" data-download-kind="file" title="Download file">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
@@ -733,9 +764,10 @@ async function deleteArchiveEntry(relativePath) {
       body: JSON.stringify({ relative_path: relativePath }),
     });
     if (result.archive_deleted) {
-      closeModal("archiveDetailModal");
       state.selectedArchive = null;
       state.selectedArchiveContents = null;
+      state.selectedArchivePath = "";
+      showArchiveListView();
       await loadArchives();
       return;
     }
@@ -749,6 +781,7 @@ async function deleteArchiveEntry(relativePath) {
 async function loadArchives() {
   if (!state.me.token_present || !state.me.repo) {
     state.archives = [];
+    showArchiveListView();
     renderArchives();
     return;
   }
@@ -780,6 +813,7 @@ function openArchiveDetail(archive) {
   $("archiveBrowserGrid").innerHTML = "";
   $("archiveBrowserNote").textContent = "";
   syncArchiveBrowserToolbar();
+  updatePageChrome();
   const githubLink = $("archiveOpenOnGithub");
   if (archive.html_url) {
     githubLink.href = archive.html_url;
@@ -787,7 +821,7 @@ function openArchiveDetail(archive) {
   } else {
     githubLink.style.display = "none";
   }
-  openModal("archiveDetailModal");
+  showArchiveBrowserView();
   loadSelectedArchiveContents().catch((error) => {
     $("archiveBrowserStatus").textContent = error.message;
     $("archiveBrowserGrid").innerHTML = "";
@@ -798,7 +832,6 @@ async function startDownload() {
   const archive = state.selectedArchive;
   if (!archive) return;
   const workers = Number($("downloadWorkers").value || 4);
-  closeModal("archiveDetailModal");
   showTransferToast();
   try {
     const result = await fetchJson("/api/download", {
@@ -818,9 +851,10 @@ async function deleteSelectedArchive() {
   if (!confirm(`Delete the entire archive "${archiveTitle(archive)}"?`)) return;
   try {
     await fetchJson(`/api/archives/${archive.release_id}`, { method: "DELETE" });
-    closeModal("archiveDetailModal");
     state.selectedArchive = null;
     state.selectedArchiveContents = null;
+    state.selectedArchivePath = "";
+    showArchiveListView();
     await loadArchives();
   } catch (error) {
     alert(error.message);
@@ -1028,6 +1062,13 @@ function setupRefresh() {
   };
   $("refreshButton").addEventListener("click", handler);
   $("refreshArchivesButton").addEventListener("click", handler);
+  $("archiveRefreshButton").addEventListener("click", async () => {
+    if (state.selectedArchive) {
+      await loadSelectedArchiveContents();
+    }
+    await loadArchives();
+    await loadTasks();
+  });
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -1049,8 +1090,15 @@ async function init() {
     if (path) downloadSelectedEntry(path, "folder");
   });
   $("archiveDeleteButton").addEventListener("click", deleteSelectedArchive);
+  $("backToArchivesButton").addEventListener("click", () => {
+    state.selectedArchive = null;
+    state.selectedArchiveContents = null;
+    state.selectedArchivePath = "";
+    showArchiveListView();
+  });
 
   try {
+    showArchiveListView();
     await loadMe();
     await loadArchives();
     await loadTasks();
