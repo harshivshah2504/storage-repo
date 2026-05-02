@@ -1,0 +1,470 @@
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f4f4f5;
+  color: #18181b;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+/* ── Layout ───────────────────────────────────────────────────────────────── */
+
+.app {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+}
+
+/* ── Topbar ───────────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.topbar .subtle {
+  margin-top: 2px;
+}
+
+.auth-box {
+  text-align: right;
+  flex-shrink: 0;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.encrypt-toggle {
+  align-self: end;
+  padding-bottom: 8px;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: #f4f4f5;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* ── Card ─────────────────────────────────────────────────────────────────── */
+
+.card {
+  background: #fff;
+  border: 1px solid #e4e4e7;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-head h2 {
+  margin-bottom: 0;
+}
+
+/* ── Utility ──────────────────────────────────────────────────────────────── */
+
+.subtle {
+  color: #71717a;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.center {
+  text-align: center;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: opacity 0.1s;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+button:not(.btn-outline) {
+  background: #18181b;
+  color: #fff;
+  border-color: #18181b;
+}
+
+.btn-outline {
+  background: #fff;
+  color: #18181b;
+  border-color: #d4d4d8;
+}
+
+/* ── Picker bar (file / folder selection row) ─────────────────────────────── */
+
+.picker-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.selection-label {
+  color: #71717a;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Form controls ────────────────────────────────────────────────────────── */
+
+label {
+  display: grid;
+  gap: 5px;
+}
+
+label > span,
+.field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #52525b;
+  letter-spacing: 0.2px;
+}
+
+input[type="text"],
+input[type="number"],
+select {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid #d4d4d8;
+  border-radius: 8px;
+  background: #fff;
+  color: #18181b;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus {
+  border-color: #a1a1aa;
+}
+
+input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+/* ── Upload options row ───────────────────────────────────────────────────── */
+
+.options-row {
+  display: grid;
+  grid-template-columns: 200px 120px;
+  gap: 12px;
+}
+
+/* ── Download form ────────────────────────────────────────────────────────── */
+
+.download-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.field-full {
+  grid-column: 1 / -1;
+}
+
+.field-full .picker-bar {
+  margin-bottom: 0;
+}
+
+.form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #3f3f46;
+  font-size: 13px;
+}
+
+.hint {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+/* ── Archives table ───────────────────────────────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 9px 8px;
+  border-bottom: 1px solid #f0f0f0;
+  text-align: left;
+}
+
+th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #71717a;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tr.archive-row {
+  cursor: pointer;
+}
+
+tr.archive-row:hover {
+  background: #fafafa;
+}
+
+tr.archive-row.selected {
+  background: #f0f4ff;
+}
+
+/* ── Task list ────────────────────────────────────────────────────────────── */
+
+.task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.task-card {
+  border: 1px solid #e4e4e7;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.task-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.task-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.task-status {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #71717a;
+  flex-shrink: 0;
+}
+
+.task-status.completed { color: #16a34a; }
+.task-status.failed    { color: #dc2626; }
+.task-status.running   { color: #2563eb; }
+
+.task-progress {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #71717a;
+}
+
+.task-links {
+  margin-top: 8px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.task-links a,
+.task-links button {
+  background: transparent;
+  color: #2563eb;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-log {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  color: #71717a;
+  font-size: 12px;
+}
+
+.task-log li {
+  margin-bottom: 2px;
+}
+
+/* ── Login card ───────────────────────────────────────────────────────────── */
+
+.login-card {
+  max-width: 420px;
+  margin: 80px auto;
+  background: #fff;
+  border: 1px solid #e4e4e7;
+  border-radius: 16px;
+  padding: 40px 36px;
+  text-align: center;
+  display: grid;
+  gap: 12px;
+}
+
+.login-card h1 {
+  font-size: 28px;
+}
+
+.btn-large {
+  display: inline-block;
+  padding: 12px 24px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 10px;
+  text-decoration: none;
+  background: #18181b;
+  color: #fff;
+  margin-top: 8px;
+}
+
+.btn-primary {
+  display: inline-block;
+  padding: 9px 16px;
+  font-weight: 600;
+  border-radius: 8px;
+  text-decoration: none;
+  background: #18181b;
+  color: #fff;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* ── Download ready banner ────────────────────────────────────────────────── */
+
+.download-ready {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* ── Task error ───────────────────────────────────────────────────────────── */
+
+.task-error {
+  color: #dc2626;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .topbar {
+    flex-direction: column;
+  }
+
+  .auth-box {
+    text-align: left;
+  }
+
+  .options-row,
+  .download-form {
+    grid-template-columns: 1fr;
+  }
+
+  .field-full {
+    grid-column: 1;
+  }
+
+  .form-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  button:not(.task-links button) {
+    width: 100%;
+    justify-content: center;
+  }
+}
