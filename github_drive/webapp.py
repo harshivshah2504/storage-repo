@@ -421,29 +421,37 @@ def create_app() -> Flask:
             uploaded_file.save(destination)
             saved_paths.append(destination)
 
+        folder_root = _browser_upload_root_folder(relative_paths)
+        source_name_override = None
+        source_type_override = None
         if len(saved_paths) == 1 and not any(path and ("/" in path or "\\" in path) for path in relative_paths):
             source_path = str(saved_paths[0])
+        elif folder_root:
+            source_path = str(staging_root / folder_root)
+            source_name_override = folder_root
+            source_type_override = "directory"
         else:
             source_path = str(staging_root)
 
         encrypt = request.form.get("encrypt", "false").lower() == "true"
-        task_id = _create_task(
-            "upload",
-            g.user_id,
-            {
-                "source_path": source_path,
-                "private_release": request.form.get("private_release", "false").lower() == "true",
-                "workers": int(request.form.get("workers", 4)),
-                "recursive": request.form.get("recursive", "true").lower() == "true",
-                "retries": int(request.form.get("retries", 3)),
-                "encrypt": encrypt,
-                "upload_mode": (request.form.get("upload_mode") or "auto").strip().lower() or "auto",
-                "resume_tag": (request.form.get("resume_tag") or "").strip() or None,
-                "cleanup_staging_root": str(staging_root),
-                "upload_origin": "browser-transfer",
-                "uploaded_file_count": len(saved_paths),
-            },
-        )
+        payload = {
+            "source_path": source_path,
+            "private_release": request.form.get("private_release", "false").lower() == "true",
+            "workers": int(request.form.get("workers", 4)),
+            "recursive": request.form.get("recursive", "true").lower() == "true",
+            "retries": int(request.form.get("retries", 3)),
+            "encrypt": encrypt,
+            "upload_mode": (request.form.get("upload_mode") or "auto").strip().lower() or "auto",
+            "resume_tag": (request.form.get("resume_tag") or "").strip() or None,
+            "cleanup_staging_root": str(staging_root),
+            "upload_origin": "browser-transfer",
+            "uploaded_file_count": len(saved_paths),
+        }
+        if source_name_override:
+            payload["source_name_override"] = source_name_override
+        if source_type_override:
+            payload["source_type_override"] = source_type_override
+        task_id = _create_task("upload", g.user_id, payload)
         _start_task_thread(task_id, _run_upload_task)
         return jsonify({"task_id": task_id})
 
@@ -813,6 +821,26 @@ def _make_basic_auth_guard(expected: tuple):
         )
 
     return guard
+
+
+def _browser_upload_root_folder(relative_paths: List[str]) -> Optional[str]:
+    """Return the shared top-level folder for a browser folder upload, if any."""
+    roots = set()
+    saw_nested_path = False
+    for raw_path in relative_paths:
+        path = (raw_path or "").strip().lstrip("/\\")
+        if not path:
+            continue
+        parts = [part for part in re.split(r"[\\/]+", path) if part]
+        if len(parts) < 2:
+            return None
+        saw_nested_path = True
+        roots.add(parts[0])
+        if len(roots) > 1:
+            return None
+    if not saw_nested_path or not roots:
+        return None
+    return next(iter(roots))
 
 
 # ── entry point ──────────────────────────────────────────────────────────────
