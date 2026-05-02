@@ -43,6 +43,7 @@ const FILTER_OPTIONS = {
 };
 
 const KIND_LABEL = {
+  folder: "Folder",
   image: "Images", video: "Video", audio: "Audio",
   document: "Documents", archive: "Archive", code: "Code", other: "Files",
 };
@@ -206,6 +207,7 @@ function showFlash(message) {
 const ARCHIVE_ICON_INLINE = `<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M3 4h18v2H3V4zm2 4h14v12H5V8zm5 3v2h4v-2h-4z"/></svg>`;
 const FOLDER_ICON_INLINE = `<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>`;
 const KIND_ICONS = {
+  folder: FOLDER_ICON_INLINE,
   image: `<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3 3.5-4.5L19 18H5l3.5-4.5z"/></svg>`,
   video: `<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>`,
   audio: `<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v9.55A4 4 0 1 0 14 16V7h4V3h-6z"/></svg>`,
@@ -223,6 +225,12 @@ function dominantKind(archive) {
     if (count > bestCount) { best = name; bestCount = count; }
   }
   return best || "other";
+}
+
+function archiveDisplayKind(archive) {
+  const meta = archive.archive || {};
+  if (meta.source_type === "directory") return "folder";
+  return dominantKind(archive);
 }
 
 function archiveTimestamp(archive) {
@@ -357,9 +365,9 @@ function renderArchives() {
     const title = archiveTitle(archive);
     const count = archiveItemCount(archive);
     const created = formatDate(meta.created_at || archive.created_at || "");
-    const kind = dominantKind(archive);
+    const kind = archiveDisplayKind(archive);
     const kindLabel = KIND_LABEL[kind] || "Files";
-    const hasCover = Boolean(meta.cover_asset_name) || kind === "image";
+    const hasCover = kind !== "folder" && (Boolean(meta.cover_asset_name) || kind === "image");
     const thumb = hasCover
       ? `<img loading="lazy" decoding="async" src="/api/archives/${archive.release_id}/cover" alt="">`
       : `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
@@ -386,7 +394,7 @@ function renderArchives() {
       const card = img.closest(".archive-card");
       const idx = Number(card?.dataset.index);
       const archive = state.filteredArchives[idx];
-      const kind = archive ? dominantKind(archive) : "other";
+      const kind = archive ? archiveDisplayKind(archive) : "other";
       img.parentElement.innerHTML = `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
     });
   });
