@@ -5,25 +5,63 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from .api import GitHubClient, parse_owner_repo
+
+DEFAULT_STATE_DIR = Path.home() / ".github-drive"
+RENDER_DISK_STATE_DIR = Path("/var/data/github-drive")
 
 
 def _resolve_state_dir() -> Path:
     configured = (os.environ.get("GITHUB_DRIVE_STATE_DIR") or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".github-drive"
+    if Path("/var/data").is_dir():
+        return RENDER_DISK_STATE_DIR
+    return DEFAULT_STATE_DIR
 
 
 APP_STATE_DIR = _resolve_state_dir()
 TOKEN_FILE = APP_STATE_DIR / "token.json"
+_MIGRATED_STATE = False
 
 
 def ensure_state_dir() -> None:
     APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_state_if_needed()
+
+
+def state_status() -> Dict:
+    ensure_state_dir()
+    return {
+        "state_dir": str(APP_STATE_DIR),
+        "token_file": str(TOKEN_FILE),
+        "using_render_disk": str(APP_STATE_DIR).startswith(str(RENDER_DISK_STATE_DIR)),
+        "state_dir_exists": APP_STATE_DIR.exists(),
+        "state_dir_writable": os.access(APP_STATE_DIR, os.W_OK),
+    }
+
+
+def _migrate_legacy_state_if_needed() -> None:
+    global _MIGRATED_STATE
+    if _MIGRATED_STATE:
+        return
+    _MIGRATED_STATE = True
+    if APP_STATE_DIR == DEFAULT_STATE_DIR or not DEFAULT_STATE_DIR.exists():
+        return
+    for filename in ("users.json", "token.json"):
+        source = DEFAULT_STATE_DIR / filename
+        destination = APP_STATE_DIR / filename
+        if not source.exists() or destination.exists():
+            continue
+        try:
+            shutil.copy2(source, destination)
+            os.chmod(destination, 0o600)
+        except OSError:
+            pass
 
 
 def get_token() -> Optional[str]:

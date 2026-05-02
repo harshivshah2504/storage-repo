@@ -33,7 +33,7 @@ from flask import (
 
 from . import users
 from .api import GitHubClient, parse_owner_repo
-from .auth_manager import restore_from_env
+from .auth_manager import ensure_state_dir, restore_from_env, state_status
 from .storage import (
     delete_archive,
     delete_archive_file,
@@ -58,6 +58,7 @@ _DOWNLOAD_LOCK = threading.Lock()
 def create_app() -> Flask:
     from werkzeug.middleware.proxy_fix import ProxyFix
 
+    ensure_state_dir()
     restore_from_env()
 
     secret = os.environ.get("GITHUB_DRIVE_SESSION_SECRET")
@@ -79,6 +80,14 @@ def create_app() -> Flask:
     app.permanent_session_lifetime = 60 * 60 * 24 * 14  # 14 days
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
+    status = state_status()
+    if os.environ.get("RENDER") and not status["using_render_disk"]:
+        LOG.warning(
+            "Render detected but account state is not using /var/data. "
+            "Users will not persist across restarts. Current state_dir=%s",
+            status["state_dir"],
+        )
+
     basic_auth = _read_basic_auth_credentials()
     if basic_auth:
         app.before_request(_make_basic_auth_guard(basic_auth))
@@ -87,7 +96,14 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
-        return jsonify({"ok": True, "users": len(users.list_users())})
+        status = state_status()
+        return jsonify({
+            "ok": True,
+            "users": len(users.list_users()),
+            "state_dir": status["state_dir"],
+            "state_dir_writable": status["state_dir_writable"],
+            "using_render_disk": status["using_render_disk"],
+        })
 
     @app.get("/login")
     def login_page():
