@@ -132,6 +132,171 @@ def list_remote_archives(client: Optional[GitHubClient] = None) -> List[Dict]:
     return list_drive_archives(client or get_client())
 
 
+def list_archive_contents(
+    release_id: Optional[int] = None,
+    tag: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    client: Optional[GitHubClient] = None,
+) -> Dict:
+    client = client or get_client()
+    release, archive_meta, _assets, _by_name, _manifest, items, _encrypted, storage_mode = _load_archive_snapshot(
+        client=client,
+        release_id=release_id,
+        tag=tag,
+        archive_id=archive_id,
+    )
+    entries = _flatten_archive_entries(items, storage_mode)
+    return {
+        "release_id": release["id"],
+        "tag": release.get("tag_name", ""),
+        "name": release.get("name") or release.get("tag_name") or "",
+        "html_url": release.get("html_url"),
+        "created_at": release.get("created_at", ""),
+        "updated_at": release.get("updated_at", ""),
+        "archive": archive_meta,
+        "storage_mode": storage_mode,
+        "supports_file_delete": storage_mode == STORAGE_MODE_FILE_ASSETS,
+        "entries": entries,
+    }
+
+
+def read_archive_file(
+    relative_path: str,
+    release_id: Optional[int] = None,
+    tag: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    encode_key: Optional[bytes] = None,
+    client: Optional[GitHubClient] = None,
+) -> Tuple[bytes, str]:
+    client = client or get_client()
+    _release, _archive_meta, _assets, _by_name, _manifest, items, encrypted, storage_mode = _load_archive_snapshot(
+        client=client,
+        release_id=release_id,
+        tag=tag,
+        archive_id=archive_id,
+    )
+    item, member = _find_archive_entry(items, storage_mode, relative_path)
+    if item is None:
+        raise RuntimeError(f"File {relative_path!r} was not found in this archive.")
+    return _read_archive_entry_bytes(
+        client=client,
+        item=item,
+        relative_path=relative_path,
+        member=member,
+        encrypted=encrypted,
+        encode_key=encode_key,
+    )
+
+
+def delete_archive_file(
+    relative_path: str,
+    release_id: Optional[int] = None,
+    tag: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    encode_key: Optional[bytes] = None,
+    client: Optional[GitHubClient] = None,
+) -> Dict:
+    client = client or get_client()
+    release, archive_meta, _assets, by_name, manifest, items, encrypted, storage_mode = _load_archive_snapshot(
+        client=client,
+        release_id=release_id,
+        tag=tag,
+        archive_id=archive_id,
+    )
+    if storage_mode != STORAGE_MODE_FILE_ASSETS:
+        raise RuntimeError("Individual file delete is unavailable for bundled archives.")
+
+    target_item, _member = _find_archive_entry(items, storage_mode, relative_path)
+    if target_item is None:
+        raise RuntimeError(f"File {relative_path!r} was not found in this archive.")
+
+    remaining_items = [item for item in items if item.get("relative_path") != relative_path]
+    if not remaining_items:
+        result = delete_archive(release_id=release["id"], client=client)
+        result["archive_deleted"] = True
+        result["deleted_path"] = relative_path
+        return result
+
+    for part in target_item.get("parts") or []:
+        asset_id = part.get("asset_id")
+        if asset_id:
+            client.delete_asset(int(asset_id))
+
+    manifest_payload = {
+        "storage_format": STORAGE_FORMAT,
+        "metadata_version": METADATA_VERSION,
+        "archive_id": archive_meta.get("archive_id"),
+        "source_name": archive_meta.get("source_name"),
+        "source_path": archive_meta.get("source_path"),
+        "created_at": archive_meta.get("created_at"),
+        "total_items": len(remaining_items),
+        "encrypted": bool(encrypted),
+        "storage_mode": storage_mode,
+        "items": [_manifest_item_from_download_item(item) for item in remaining_items],
+    }
+
+    remaining_paths = [item.get("relative_path") or "" for item in remaining_items]
+    archive_meta["total_items"] = len(remaining_items)
+    archive_meta["kinds"] = _classify_relative_paths(remaining_paths)
+    archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(
+        _is_image_path(path) for path in remaining_paths
+    ) else None
+
+    client.update_release(
+        release["id"],
+        name=_make_archive_title(archive_meta.get("source_name") or release.get("name") or "archive", len(remaining_items)),
+        body=encode_archive_body(archive_meta),
+    )
+
+    existing_manifest = by_name.get(MANIFEST_ASSET_NAME)
+    if existing_manifest:
+        client.delete_asset(existing_manifest["id"])
+    client.upload_asset_bytes(
+        release_id=release["id"],
+        asset_name=MANIFEST_ASSET_NAME,
+        payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
+        content_type="application/json",
+    )
+
+    existing_cover = by_name.get(COVER_ASSET_NAME)
+    if existing_cover:
+        try:
+            client.delete_asset(existing_cover["id"])
+        except Exception:
+            pass
+    next_image = next((item for item in remaining_items if _is_image_path(item.get("relative_path") or "")), None)
+    if next_image:
+        try:
+            image_bytes, _content_type = _read_archive_entry_bytes(
+                client=client,
+                item=next_image,
+                relative_path=next_image["relative_path"],
+                member=None,
+                encrypted=encrypted,
+                encode_key=encode_key,
+            )
+            from . import thumbnails
+            cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
+            if cover_bytes:
+                client.upload_asset_bytes(
+                    release_id=release["id"],
+                    asset_name=COVER_ASSET_NAME,
+                    payload=cover_bytes,
+                    content_type="image/jpeg",
+                )
+        except Exception:
+            pass
+
+    return {
+        "release_id": release["id"],
+        "tag": release.get("tag_name", ""),
+        "archive_deleted": False,
+        "deleted_path": relative_path,
+        "remaining_items": len(remaining_items),
+        "archive": archive_meta,
+    }
+
+
 def upload_archive(
     source_path: str,
     private_release: bool = False,
@@ -158,6 +323,10 @@ def upload_archive(
     upload_mode = _normalize_upload_mode(upload_mode)
     storage_mode = _choose_storage_mode(entries, upload_mode)
 
+    from . import thumbnails
+    kinds = thumbnails.classify_entries(entries)
+    cover_candidate = thumbnails.first_image_entry(entries)
+
     created_at = now_utc_iso()
     archive_meta = {
         "storage_format": STORAGE_FORMAT,
@@ -168,6 +337,8 @@ def upload_archive(
         "total_items": len(entries),
         "encrypted": bool(encrypt),
         "storage_mode": storage_mode,
+        "kinds": kinds,
+        "cover_asset_name": thumbnails.COVER_ASSET_NAME if cover_candidate else None,
     }
     release, archive_meta = _prepare_upload_release(
         client=client,
@@ -199,6 +370,21 @@ def upload_archive(
     )
 
     existing_assets = {asset["name"]: asset for asset in client.list_release_assets(release_id)}
+
+    # Best-effort cover thumbnail. Failures are non-fatal — listing without _cover.jpg
+    # falls back to the generic icon on the frontend.
+    if cover_candidate and thumbnails.COVER_ASSET_NAME not in existing_assets:
+        cover_bytes = thumbnails.make_cover_jpeg(cover_candidate["source_path"])
+        if cover_bytes:
+            try:
+                client.upload_asset_bytes(
+                    release_id=release_id,
+                    asset_name=thumbnails.COVER_ASSET_NAME,
+                    payload=cover_bytes,
+                    content_type="image/jpeg",
+                )
+            except Exception:
+                pass
 
     items: List[ArchiveItem] = []
     completed_items = 0
@@ -851,6 +1037,8 @@ def _build_download_items(
                     "relative_path": entry.get("relative_path") or first["asset_name"],
                     "encrypted": bool(entry.get("encrypted", encrypted)),
                     "original_size": int(entry.get("original_size", first["size"] or 0)),
+                    "content_type": entry.get("content_type") or asset.get("content_type", "application/octet-stream"),
+                    "source_sha256": entry.get("source_sha256") or "",
                     "parts": parts,
                     "members": list(entry.get("members") or []),
                 }
@@ -868,6 +1056,8 @@ def _build_download_items(
                     "relative_path": relative_path,
                     "encrypted": asset_encrypted,
                     "original_size": int(asset.get("size", 0)),
+                    "content_type": asset.get("content_type", "application/octet-stream"),
+                    "source_sha256": "",
                     "parts": [{
                         "order": 0,
                         "asset_id": asset["id"],
@@ -1165,8 +1355,152 @@ def delete_archive(
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+COVER_ASSET_NAME = "_cover.jpg"
+
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _NAME_CACHE_LOCK = None
+
+
+def _load_archive_snapshot(
+    client: GitHubClient,
+    release_id: Optional[int],
+    tag: Optional[str],
+    archive_id: Optional[str],
+) -> Tuple[Dict, Dict, List[Dict], Dict[str, Dict], Optional[Dict], List[Dict], bool, str]:
+    release = _resolve_release(client, release_id=release_id, tag=tag, archive_id=archive_id)
+    archive_meta = decode_archive_body(release.get("body") or "")
+    if not archive_meta:
+        raise RuntimeError(f"Release {release.get('tag_name')} is not a github-drive archive.")
+    assets = client.list_release_assets(release["id"])
+    by_name = {asset["name"]: asset for asset in assets}
+    manifest = None
+    if MANIFEST_ASSET_NAME in by_name:
+        try:
+            manifest_bytes = client.download_asset_bytes(by_name[MANIFEST_ASSET_NAME]["id"])
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except (GitHubError, json.JSONDecodeError, UnicodeDecodeError):
+            manifest = None
+    items, encrypted, storage_mode, _progress_total = _build_download_items(client, release["id"], assets, archive_meta)
+    return release, archive_meta, assets, by_name, manifest, items, encrypted, storage_mode
+
+
+def _flatten_archive_entries(items: List[Dict], storage_mode: str) -> List[Dict]:
+    from . import thumbnails
+
+    entries: List[Dict] = []
+    if storage_mode == STORAGE_MODE_BUNDLE_ASSETS:
+        for item in items:
+            for member in item.get("members") or []:
+                relative_path = member.get("relative_path") or ""
+                ext = Path(relative_path).suffix.lower()
+                entries.append(
+                    {
+                        "relative_path": relative_path,
+                        "original_size": int(member.get("original_size") or 0),
+                        "content_type": member.get("content_type") or "application/octet-stream",
+                        "kind": thumbnails.classify_extension(ext),
+                        "previewable": ext in thumbnails.IMAGE_EXTENSIONS,
+                    }
+                )
+    else:
+        for item in items:
+            relative_path = item.get("relative_path") or ""
+            ext = Path(relative_path).suffix.lower()
+            entries.append(
+                {
+                    "relative_path": relative_path,
+                    "original_size": int(item.get("original_size") or 0),
+                    "content_type": item.get("content_type") or "application/octet-stream",
+                    "kind": thumbnails.classify_extension(ext),
+                    "previewable": ext in thumbnails.IMAGE_EXTENSIONS,
+                }
+            )
+    entries.sort(key=lambda entry: entry["relative_path"].lower())
+    return entries
+
+
+def _find_archive_entry(items: List[Dict], storage_mode: str, relative_path: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+    needle = str(relative_path or "")
+    if storage_mode == STORAGE_MODE_BUNDLE_ASSETS:
+        for item in items:
+            for member in item.get("members") or []:
+                if member.get("relative_path") == needle:
+                    return item, member
+        return None, None
+    for item in items:
+        if item.get("relative_path") == needle:
+            return item, None
+    return None, None
+
+
+def _read_archive_entry_bytes(
+    client: GitHubClient,
+    item: Dict,
+    relative_path: str,
+    member: Optional[Dict],
+    encrypted: bool,
+    encode_key: Optional[bytes],
+    retries: int = 3,
+) -> Tuple[bytes, str]:
+    temp_dir = tempfile.mkdtemp(prefix="github-drive-read-")
+    try:
+        if member is not None:
+            bundle_path = os.path.join(temp_dir, "bundle.zip")
+            _materialize_download_parts(
+                client=client,
+                item=item,
+                output_path=bundle_path,
+                encrypted=encrypted,
+                encode_key=encode_key,
+                retries=retries,
+            )
+            with zipfile.ZipFile(bundle_path, "r") as archive:
+                with archive.open(relative_path, "r") as src:
+                    return src.read(), member.get("content_type") or "application/octet-stream"
+
+        file_path = os.path.join(temp_dir, "entry.bin")
+        _materialize_download_parts(
+            client=client,
+            item=item,
+            output_path=file_path,
+            encrypted=encrypted,
+            encode_key=encode_key,
+            retries=retries,
+        )
+        with open(file_path, "rb") as handle:
+            return handle.read(), item.get("content_type") or "application/octet-stream"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _manifest_item_from_download_item(item: Dict) -> Dict:
+    return {
+        "order": int(item.get("order") or 0),
+        "asset_name": item.get("asset_name") or "",
+        "asset_id": int(item.get("asset_id") or 0),
+        "relative_path": item.get("relative_path") or "",
+        "original_size": int(item.get("original_size") or 0),
+        "source_sha256": item.get("source_sha256") or "",
+        "encrypted": bool(item.get("encrypted")),
+        "content_type": item.get("content_type") or "application/octet-stream",
+        "parts": list(item.get("parts") or []),
+        "members": list(item.get("members") or []),
+    }
+
+
+def _classify_relative_paths(relative_paths: List[str]) -> Dict[str, int]:
+    from . import thumbnails
+
+    counts = {"image": 0, "video": 0, "audio": 0, "document": 0, "archive": 0, "code": 0, "other": 0}
+    for relative_path in relative_paths:
+        counts[thumbnails.classify_extension(Path(relative_path).suffix.lower())] += 1
+    return counts
+
+
+def _is_image_path(relative_path: str) -> bool:
+    from . import thumbnails
+
+    return Path(relative_path).suffix.lower() in thumbnails.IMAGE_EXTENSIONS
 
 
 def _sanitize_for_asset_name(value: str) -> str:

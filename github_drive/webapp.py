@@ -34,7 +34,15 @@ from flask import (
 from . import users
 from .api import GitHubClient, parse_owner_repo
 from .auth_manager import restore_from_env
-from .storage import delete_archive, download_archive, list_remote_archives, upload_archive
+from .storage import (
+    delete_archive,
+    delete_archive_file,
+    download_archive,
+    list_archive_contents,
+    list_remote_archives,
+    read_archive_file,
+    upload_archive,
+)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -242,12 +250,129 @@ def create_app() -> Flask:
             return jsonify({"error": str(exc)}), 500
         return jsonify({"archives": result})
 
+    @app.get("/api/archives/<int:release_id>/cover")
+    @login_required
+    def archive_cover(release_id: int):
+        from . import thumbnails
+        try:
+            client = _user_client(g.user_id)
+            assets = client.list_release_assets(release_id)
+        except Exception:
+            abort(404)
+        cover = next((a for a in assets if a["name"] == thumbnails.COVER_ASSET_NAME), None)
+        if not cover:
+            legacy_image = thumbnails.first_image_asset(assets)
+            if not legacy_image:
+                abort(404)
+            try:
+                original = client.download_asset_bytes(legacy_image["id"])
+                data = thumbnails.make_cover_jpeg_from_bytes(original)
+            except Exception:
+                abort(404)
+            if not data:
+                abort(404)
+            try:
+                uploaded = client.upload_asset_bytes(
+                    release_id=release_id,
+                    asset_name=thumbnails.COVER_ASSET_NAME,
+                    payload=data,
+                    content_type="image/jpeg",
+                )
+                cover = uploaded
+            except Exception:
+                cover = None
+            return Response(
+                data,
+                mimetype="image/jpeg",
+                headers={"Cache-Control": "private, max-age=600"},
+            )
+        try:
+            data = client.download_asset_bytes(cover["id"])
+        except Exception:
+            abort(404)
+        return Response(
+            data,
+            mimetype="image/jpeg",
+            headers={"Cache-Control": "private, max-age=600"},
+        )
+
     @app.delete("/api/archives/<int:release_id>")
     @login_required
     def archive_delete(release_id: int):
         try:
             client = _user_client(g.user_id)
             result = delete_archive(release_id=release_id, client=client)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(result)
+
+    @app.get("/api/archives/<int:release_id>/contents")
+    @login_required
+    def archive_contents(release_id: int):
+        try:
+            client = _user_client(g.user_id)
+            result = list_archive_contents(release_id=release_id, client=client)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(result)
+
+    @app.get("/api/archives/<int:release_id>/file")
+    @login_required
+    def archive_file(release_id: int):
+        from . import thumbnails
+
+        relative_path = (request.args.get("path") or "").strip()
+        if not relative_path:
+            return jsonify({"error": "path is required"}), 400
+        thumb = (request.args.get("thumb") or "").strip().lower() in {"1", "true", "yes"}
+        try:
+            client = _user_client(g.user_id)
+            encode_key = _user_encode_key(g.user_id)
+            payload, content_type = read_archive_file(
+                release_id=release_id,
+                relative_path=relative_path,
+                encode_key=encode_key,
+                client=client,
+            )
+            if thumb:
+                thumb_bytes = thumbnails.make_cover_jpeg_from_bytes(payload)
+                if not thumb_bytes:
+                    abort(404)
+                return Response(
+                    thumb_bytes,
+                    mimetype="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=600"},
+                )
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            abort(404)
+        return Response(
+            payload,
+            mimetype=content_type or "application/octet-stream",
+            headers={"Cache-Control": "private, max-age=600"},
+        )
+
+    @app.delete("/api/archives/<int:release_id>/files")
+    @login_required
+    def archive_file_delete(release_id: int):
+        payload = request.get_json(force=True) or {}
+        relative_path = (payload.get("relative_path") or "").strip()
+        if not relative_path:
+            return jsonify({"error": "relative_path is required"}), 400
+        try:
+            client = _user_client(g.user_id)
+            encode_key = _user_encode_key(g.user_id)
+            result = delete_archive_file(
+                release_id=release_id,
+                relative_path=relative_path,
+                encode_key=encode_key,
+                client=client,
+            )
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
