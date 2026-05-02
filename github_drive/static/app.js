@@ -256,6 +256,11 @@ function archiveFileUrl(releaseId, relativePath, thumb = false) {
   return `/api/archives/${releaseId}/file?${params.toString()}`;
 }
 
+function archiveEntryDownloadUrl(releaseId, relativePath, kind = "file") {
+  const params = new URLSearchParams({ path: relativePath, kind });
+  return `/api/archives/${releaseId}/download-entry?${params.toString()}`;
+}
+
 function basename(relativePath) {
   const parts = String(relativePath || "").split("/").filter(Boolean);
   return parts[parts.length - 1] || relativePath || "";
@@ -263,6 +268,29 @@ function basename(relativePath) {
 
 function normalizeArchivePath(path) {
   return String(path || "").replace(/^\/+|\/+$/g, "");
+}
+
+function downloadSelectedEntry(relativePath, kind = "file") {
+  const archive = state.selectedArchive;
+  if (!archive || !archive.release_id || !relativePath) return;
+  window.location.href = archiveEntryDownloadUrl(archive.release_id, relativePath, kind);
+}
+
+function syncArchiveBrowserToolbar() {
+  const archive = state.selectedArchive;
+  const currentPath = normalizeArchivePath(state.selectedArchivePath);
+  const tag = $("archiveDetailTagText");
+  const button = $("downloadCurrentFolderButton");
+  if (tag) {
+    tag.textContent = archive?.tag ? `Tag: ${archive.tag}` : "";
+  }
+  if (!button) return;
+  if (!archive?.release_id || !currentPath) {
+    button.style.display = "none";
+    return;
+  }
+  button.style.display = "";
+  button.textContent = `Download ${basename(currentPath) || "folder"}`;
 }
 
 function matchesTypeFilter(archive, value) {
@@ -546,8 +574,9 @@ function renderArchiveContents() {
 
   state.selectedArchivePath = normalizeArchivePath(state.selectedArchivePath);
   renderArchiveBreadcrumbs();
+  syncArchiveBrowserToolbar();
   note.textContent = contents.supports_file_delete
-    ? "Open folders, preview images, and remove files from this archive."
+    ? "Open folders, preview images, or download any file or folder."
     : "This archive was bundled for faster upload, so individual file delete is unavailable.";
 
   const { folders, files } = listArchiveChildren(contents.entries || [], state.selectedArchivePath);
@@ -559,8 +588,15 @@ function renderArchiveContents() {
   }
 
   const folderCards = folders.map((folder) => `
-    <button type="button" class="archive-node folder" data-folder-path="${escapeHtml(folder.path)}">
-      <div class="archive-node-icon">${FOLDER_ICON_INLINE}</div>
+    <div class="archive-node folder" data-folder-path="${escapeHtml(folder.path)}">
+      <div class="archive-node-folder-header">
+        <div class="archive-node-icon">${FOLDER_ICON_INLINE}</div>
+        <div class="archive-node-actions">
+          <button type="button" class="icon-button" data-download-path="${escapeHtml(folder.path)}" data-download-kind="folder" title="Download folder">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
+          </button>
+        </div>
+      </div>
       <div class="archive-node-body">
         <div class="archive-node-name">${escapeHtml(folder.name)}</div>
         <div class="archive-node-meta">
@@ -568,7 +604,7 @@ function renderArchiveContents() {
           ${folder.imageCount ? `<span>${folder.imageCount} image${folder.imageCount === 1 ? "" : "s"}</span>` : ""}
         </div>
       </div>
-    </button>
+    </div>
   `).join("");
 
   const archive = state.selectedArchive;
@@ -581,11 +617,9 @@ function renderArchiveContents() {
       : `<div class="archive-node-icon">${icon}</div>`;
     const deleteButton = contents.supports_file_delete
       ? `
-        <div class="archive-node-actions">
-          <button type="button" class="icon-button" data-delete-path="${escapeHtml(file.relative_path)}" title="Delete file">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zm3.46-7.12 1.41-1.41L12 11.59l1.12-1.12 1.41 1.41L13.41 13l1.12 1.12-1.41 1.41L12 14.41l-1.12 1.12-1.41-1.41L10.59 13l-1.13-1.12zM15.5 4l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-          </button>
-        </div>
+        <button type="button" class="icon-button" data-delete-path="${escapeHtml(file.relative_path)}" title="Delete file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zm3.46-7.12 1.41-1.41L12 11.59l1.12-1.12 1.41 1.41L13.41 13l1.12 1.12-1.41 1.41L12 14.41l-1.12 1.12-1.41-1.41L10.59 13l-1.13-1.12zM15.5 4l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+        </button>
       `
       : "";
     return `
@@ -598,7 +632,12 @@ function renderArchiveContents() {
             <span>${escapeHtml(formatBytes(file.original_size || 0))}</span>
           </div>
         </div>
-        ${deleteButton}
+        <div class="archive-node-actions">
+          <button type="button" class="icon-button" data-download-path="${escapeHtml(file.relative_path)}" data-download-kind="file" title="Download file">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
+          </button>
+          ${deleteButton}
+        </div>
       </div>
     `;
   }).join("");
@@ -609,6 +648,12 @@ function renderArchiveContents() {
     button.addEventListener("click", () => {
       state.selectedArchivePath = button.dataset.folderPath || "";
       renderArchiveContents();
+    });
+  });
+  grid.querySelectorAll("[data-download-path]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      downloadSelectedEntry(button.dataset.downloadPath || "", button.dataset.downloadKind || "file");
     });
   });
   grid.querySelectorAll("[data-file-path]").forEach((card) => {
@@ -723,7 +768,11 @@ function openArchiveDetail(archive) {
   const created = formatDate(meta.created_at || archive.created_at || "");
   $("archiveDetailTitle").textContent = title;
   $("archiveDetailMeta").textContent = `${count} item${count === 1 ? "" : "s"} · ${created}`;
-  $("archiveDetailTag").value = archive.tag || "";
+  $("archiveDetailTagText").textContent = archive.tag ? `Tag: ${archive.tag}` : "";
+  $("archiveBrowserStatus").textContent = "Loading files…";
+  $("archiveBrowserGrid").innerHTML = "";
+  $("archiveBrowserNote").textContent = "";
+  syncArchiveBrowserToolbar();
   const githubLink = $("archiveOpenOnGithub");
   if (archive.html_url) {
     githubLink.href = archive.html_url;
@@ -988,6 +1037,10 @@ async function init() {
   $("credsForm").addEventListener("submit", submitCreds);
   $("clearCredsButton").addEventListener("click", clearCreds);
   $("startDownloadButton").addEventListener("click", startDownload);
+  $("downloadCurrentFolderButton").addEventListener("click", () => {
+    const path = normalizeArchivePath(state.selectedArchivePath);
+    if (path) downloadSelectedEntry(path, "folder");
+  });
   $("archiveDeleteButton").addEventListener("click", deleteSelectedArchive);
 
   try {

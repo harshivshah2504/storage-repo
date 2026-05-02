@@ -772,16 +772,9 @@ input, select {
   padding: 16px 24px 20px;
 }
 
-.archive-detail-layout {
+.archive-detail-body {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 20px;
-  align-items: start;
-}
-
-.archive-detail-settings {
-  display: grid;
-  gap: 8px;
+  gap: 14px;
 }
 
 .archive-browser-note {
@@ -802,6 +795,44 @@ input, select {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.archive-browser-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.archive-workers-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.archive-workers-field .text-input {
+  width: 76px;
+  padding: 8px 10px;
+}
+
+.archive-browser-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.archive-detail-tag {
+  font-size: 12px;
+  color: var(--color-text-subtle);
+  background: var(--color-surface-alt);
+  border-radius: 999px;
+  padding: 6px 10px;
 }
 
 .archive-breadcrumbs {
@@ -861,6 +892,13 @@ input, select {
   padding: 16px;
 }
 
+.archive-node-folder-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .archive-node-thumb {
   position: relative;
   aspect-ratio: 1;
@@ -917,12 +955,18 @@ input, select {
 .archive-node-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
   padding: 0 12px 12px;
 }
 
 .archive-node-actions .icon-button {
   width: 32px;
   height: 32px;
+  border-radius: 50%;
+}
+
+.archive-node.folder .archive-node-actions {
+  padding: 0;
 }
 
 .archive-node-empty {
@@ -1035,8 +1079,10 @@ input, select {
 .btn-danger:hover { background: rgba(217, 48, 37, 0.08); }
 
 @media (max-width: 900px) {
-  .archive-detail-layout {
-    grid-template-columns: 1fr;
+  .archive-browser-toolbar-actions,
+  .archive-browser-status-row {
+    align-items: flex-start;
+    justify-content: flex-start;
   }
 
   .modal.modal-wide,
