@@ -49,7 +49,7 @@ Inspect auth state:
 python -m github_drive auth-status
 ```
 
-The token is saved to `~/.github-drive/token.json` (chmod 600). You can also configure via env vars:
+The token is saved to `GITHUB_DRIVE_STATE_DIR/token.json` when that env var is set, otherwise `~/.github-drive/token.json` (chmod 600). You can also configure via env vars:
 
 - `GITHUB_DRIVE_TOKEN` (or `GITHUB_TOKEN`)
 - `GITHUB_DRIVE_REPO` (e.g. `owner/repo`)
@@ -117,12 +117,12 @@ Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant
 
 | Concern | Behaviour |
 |---|---|
-| Account store | `~/.github-drive/users.json`. One JSON record per user, scrypt-hashed password, atomically written. |
+| Account store | `GITHUB_DRIVE_STATE_DIR/users.json` when set, otherwise `~/.github-drive/users.json`. One JSON record per user, scrypt-hashed password, atomically written. |
 | Session | Flask signed cookie, HttpOnly + SameSite=Lax. Lifetime: 14 days. Signed with `GITHUB_DRIVE_SESSION_SECRET`. |
 | GitHub PAT | Encrypted at rest with AES-128-GCM, key derived from `GITHUB_DRIVE_SESSION_SECRET` + username. Rotating the session secret invalidates stored PATs and forces every user to re-enter theirs. |
 | Encryption key for archive contents | Derived from `GITHUB_DRIVE_ENCRYPTION_KEY` (or session secret fallback) HMAC-mixed with the username, so two users on the same server cannot decrypt each other's archives. |
 | Tasks | Each task records its `user_id`; `/api/tasks` only returns the caller's. Background runners use the per-user PAT. |
-| Signup | **Disabled by default.** Admin creates accounts via CLI. Set `GITHUB_DRIVE_ALLOW_SIGNUP=1` to expose `/signup`. |
+| Signup | **Always open.** Anyone reaching the URL can create an account at `/signup`. Combine with `GITHUB_DRIVE_BASIC_AUTH` if you want an outer gate (invite-only style). |
 
 ### Provisioning users (CLI, on the host)
 
@@ -137,7 +137,7 @@ The user then signs in at the web URL, configures their own PAT and target repo,
 
 ### CLI vs web
 
-The CLI (`github-drive upload`, `download`, etc.) is **single-tenant**. It uses `~/.github-drive/token.json` as before — meant for the operator running it locally. The multi-user experience is web-only.
+The CLI (`github-drive upload`, `download`, etc.) is **single-tenant**. It uses `GITHUB_DRIVE_STATE_DIR/token.json` when set, otherwise `~/.github-drive/token.json` — meant for the operator running it locally. The multi-user experience is web-only.
 
 ## Hosting
 
@@ -158,19 +158,21 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_TOKEN` | recommended | GitHub PAT with `repo` scope. If set, the UI does not need to ask for it. |
 | `GITHUB_DRIVE_REPO` | recommended | Target repository as `owner/repo`. |
 | `GITHUB_DRIVE_BASIC_AUTH` | optional outer gate | `user:password`. When set, every route (including `/login`) is wrapped in HTTP Basic. Useful as an outer perimeter on top of per-user logins; not a replacement for them. `/healthz` stays open for platform probes. |
-| `GITHUB_DRIVE_ALLOW_SIGNUP` | optional | `1` to expose `/signup`. Default off — admin provisions accounts with `github-drive users add`. |
 | `GITHUB_DRIVE_USER_ID` | optional, legacy | Namespace for the legacy derivation. Only consulted when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPT` | optional | `1` to encrypt every web upload by default. |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | optional | Max single-request upload size. Default 5 GB. |
+| `GITHUB_DRIVE_STATE_DIR` | recommended on hosted installs | Directory for persistent local state such as `users.json` and `token.json`. On Render, point this at the mounted disk path. |
 | `PORT` | injected by host | Standard PaaS variable; the app reads it automatically. |
 
 ### Hosted vs local: ephemeral filesystem
 
-On Render, Fly.io, etc. the filesystem is wiped on every restart. If you configure the PAT through the web UI it will be lost on the next restart — set `GITHUB_DRIVE_TOKEN` and `GITHUB_DRIVE_REPO` as platform secrets so the app self-restores on boot.
+On Render, Fly.io, etc. the filesystem is wiped on every restart unless you mount persistent storage. That affects both the operator token file and the multi-user account store, so hosted signups can disappear after a restart if `users.json` lives on the ephemeral root filesystem.
+
+For Render, mount a persistent disk and point `GITHUB_DRIVE_STATE_DIR` at it. The included [render.yaml](render.yaml) does this by mounting `/var/data` and storing app state in `/var/data/github-drive`. Without that, a newly created hosted user may be able to sign up once and then fail to log back in after the service restarts because their record is gone.
 
 ### Deploy targets
 
-**Render:** push the repo and click "New Blueprint" — Render reads `render.yaml`, generates `GITHUB_DRIVE_SESSION_SECRET`, and prompts you for the rest. Health check at `/healthz`.
+**Render:** push the repo and click "New Blueprint" — Render reads `render.yaml`, provisions a 1 GB persistent disk at `/var/data`, sets `GITHUB_DRIVE_STATE_DIR=/var/data/github-drive`, generates `GITHUB_DRIVE_SESSION_SECRET`, and prompts you for the rest. Health check at `/healthz`.
 
 **Docker (any host):**
 

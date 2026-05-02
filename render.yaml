@@ -5,9 +5,15 @@ services:
     buildCommand: pip install -r requirements.txt && pip install -e .
     startCommand: gunicorn "github_drive.webapp:create_app()" --bind "0.0.0.0:$PORT" --workers 1 --threads 8 --timeout 600
     healthCheckPath: /healthz
+    disk:
+      name: github-drive-state
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: GITHUB_DRIVE_SESSION_SECRET
         generateValue: true
+      - key: GITHUB_DRIVE_STATE_DIR
+        value: /var/data/github-drive
       - key: GITHUB_DRIVE_TOKEN
         sync: false
       - key: GITHUB_DRIVE_REPO
@@ -18,8 +24,6 @@ services:
         sync: false
       - key: GITHUB_DRIVE_ENCRYPTION_KEY
         sync: false
-      - key: GITHUB_DRIVE_ALLOW_SIGNUP
-        value: "0"
       - key: GITHUB_DRIVE_BASIC_AUTH
         sync: false
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
