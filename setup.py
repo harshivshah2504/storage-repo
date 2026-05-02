@@ -16,7 +16,6 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     package_data={"github_drive": ["templates/*.html", "static/*"]},
-    scripts=["bin/github-drive"],
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
