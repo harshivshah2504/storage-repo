@@ -1,6 +1,6 @@
 """Per-user account store for the multi-tenant web frontend.
 
-The CLI remains single-tenant (it reads ~/.github-drive/token.json directly). This module
+The CLI remains single-tenant (it reads the configured state dir token file directly). This module
 backs the web app: signup, login, and per-user GitHub credentials.
 
 Security notes:

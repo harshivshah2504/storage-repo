@@ -10,7 +10,15 @@ from typing import Dict, Optional, Tuple
 
 from .api import GitHubClient, parse_owner_repo
 
-APP_STATE_DIR = Path.home() / ".github-drive"
+
+def _resolve_state_dir() -> Path:
+    configured = (os.environ.get("GITHUB_DRIVE_STATE_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".github-drive"
+
+
+APP_STATE_DIR = _resolve_state_dir()
 TOKEN_FILE = APP_STATE_DIR / "token.json"
 
 
