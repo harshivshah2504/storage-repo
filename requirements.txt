@@ -1,0 +1,4 @@
+Flask
+gunicorn
+requests>=2.31.0
+PyCryptodome==3.17.0
