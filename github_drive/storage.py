@@ -306,6 +306,8 @@ def upload_archive(
     encrypt: bool = False,
     encode_key: Optional[bytes] = None,
     upload_mode: str = UPLOAD_MODE_AUTO,
+    source_name_override: Optional[str] = None,
+    source_type_override: Optional[str] = None,
     resume_release_id: Optional[int] = None,
     resume_tag: Optional[str] = None,
     resume_archive_id: Optional[str] = None,
@@ -320,6 +322,10 @@ def upload_archive(
     client = client or get_client()
     entries = collect_file_entries(source_path, recursive=recursive)
     source = Path(source_path).expanduser().resolve()
+    source_name = (source_name_override or source.name or "archive").strip() or "archive"
+    source_type = (source_type_override or ("directory" if source.is_dir() else "file")).strip().lower()
+    if source_type not in {"file", "directory"}:
+        source_type = "directory" if source.is_dir() else "file"
     upload_mode = _normalize_upload_mode(upload_mode)
     storage_mode = _choose_storage_mode(entries, upload_mode)
 
@@ -332,7 +338,8 @@ def upload_archive(
         "storage_format": STORAGE_FORMAT,
         "metadata_version": METADATA_VERSION,
         "created_at": created_at,
-        "source_name": source.name,
+        "source_name": source_name,
+        "source_type": source_type,
         "source_path": str(source),
         "total_items": len(entries),
         "encrypted": bool(encrypt),
@@ -343,7 +350,7 @@ def upload_archive(
     release, archive_meta = _prepare_upload_release(
         client=client,
         archive_meta=archive_meta,
-        source_name=source.name,
+        source_name=source_name,
         retries=retries,
         private_release=private_release,
         resume_release_id=resume_release_id,
@@ -353,7 +360,7 @@ def upload_archive(
     created_at = archive_meta["created_at"]
     archive_id = archive_meta["archive_id"]
     tag = release.get("tag_name") or archive_tag_for(archive_id)
-    title = release.get("name") or _make_archive_title(source.name, len(entries))
+    title = release.get("name") or _make_archive_title(source_name, len(entries))
     release_id = release["id"]
 
     emit_progress(
@@ -491,7 +498,8 @@ def upload_archive(
         "metadata_version": METADATA_VERSION,
         "archive_id": archive_id,
         "created_at": created_at,
-        "source_name": source.name,
+        "source_name": source_name,
+        "source_type": source_type,
         "source_path": str(source),
         "total_items": len(entries),
         "encrypted": bool(encrypt),
