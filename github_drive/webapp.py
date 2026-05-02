@@ -1,0 +1,710 @@
+import base64
+import functools
+import io
+import json
+import logging
+import os
+import re
+import secrets
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+import warnings
+import zipfile
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from flask import (
+    Flask,
+    Response,
+    abort,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+
+from . import users
+from .api import GitHubClient, parse_owner_repo
+from .auth_manager import restore_from_env
+from .storage import delete_archive, download_archive, list_remote_archives, upload_archive
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
+LOG = logging.getLogger("github_drive.webapp")
+
+_TASKS: Dict[str, Dict[str, Any]] = {}
+_TASK_LOCK = threading.Lock()
+_DOWNLOAD_DIRS: Dict[str, str] = {}
+_DOWNLOAD_LOCK = threading.Lock()
+
+
+def create_app() -> Flask:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    restore_from_env()
+
+    secret = os.environ.get("GITHUB_DRIVE_SESSION_SECRET")
+    if not secret:
+        secret = secrets.token_hex(32)
+        LOG.warning(
+            "GITHUB_DRIVE_SESSION_SECRET is not set; generated an ephemeral one. "
+            "Set this env var in production so sessions, stored PATs, and the encryption "
+            "key remain stable across restarts."
+        )
+        os.environ["GITHUB_DRIVE_SESSION_SECRET"] = secret
+
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app.secret_key = secret
+    app.config["MAX_CONTENT_LENGTH"] = _max_upload_bytes()
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = _cookie_secure_default()
+    app.permanent_session_lifetime = 60 * 60 * 24 * 14  # 14 days
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+    basic_auth = _read_basic_auth_credentials()
+    if basic_auth:
+        app.before_request(_make_basic_auth_guard(basic_auth))
+
+    # ── public routes (no login) ─────────────────────────────────────────────
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"ok": True, "users": len(users.list_users())})
+
+    @app.get("/login")
+    def login_page():
+        return render_template(
+            "login.html",
+            asset_version=_asset_version(),
+            allow_signup=users.signup_enabled(),
+            mode="login",
+            error=None,
+        )
+
+    @app.post("/login")
+    def login_submit():
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        user = users.verify_password(username, password)
+        if not user:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=users.signup_enabled(),
+                mode="login",
+                error="Invalid username or password.",
+            ), 401
+        session.clear()
+        session["user_id"] = user["username"]
+        session.permanent = True
+        return redirect(url_for("index"))
+
+    @app.get("/signup")
+    def signup_page():
+        if not users.signup_enabled():
+            return _signup_disabled_response()
+        return render_template(
+            "login.html",
+            asset_version=_asset_version(),
+            allow_signup=True,
+            mode="signup",
+            error=None,
+        )
+
+    @app.post("/signup")
+    def signup_submit():
+        if not users.signup_enabled():
+            return _signup_disabled_response()
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        confirm = request.form.get("confirm_password") or ""
+        if password != confirm:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=True,
+                mode="signup",
+                error="Passwords do not match.",
+            ), 400
+        try:
+            user = users.create_user(username, password)
+        except ValueError as exc:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=True,
+                mode="signup",
+                error=str(exc),
+            ), 400
+        session.clear()
+        session["user_id"] = user["username"]
+        session.permanent = True
+        return redirect(url_for("index"))
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login_page"))
+
+    # ── login gate for everything below ──────────────────────────────────────
+
+    @app.before_request
+    def attach_user():
+        g.user_id = session.get("user_id")
+
+    def login_required(view: Callable):
+        @functools.wraps(view)
+        def wrapped(*args, **kwargs):
+            if not g.get("user_id"):
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Login required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+        return wrapped
+
+    # ── pages ────────────────────────────────────────────────────────────────
+
+    @app.get("/")
+    @login_required
+    def index():
+        return render_template("index.html", asset_version=_asset_version(), username=g.user_id)
+
+    # ── user / GitHub credentials API ────────────────────────────────────────
+
+    @app.get("/api/me")
+    @login_required
+    def api_me():
+        status = users.get_user_status(g.user_id)
+        return jsonify(status)
+
+    @app.post("/api/me/credentials")
+    @login_required
+    def api_set_credentials():
+        payload = request.get_json(force=True) or {}
+        token = (payload.get("token") or "").strip()
+        repo_slug = (payload.get("repo") or "").strip()
+        if not token:
+            return jsonify({"error": "token is required"}), 400
+        if not repo_slug or "/" not in repo_slug:
+            return jsonify({"error": "repo is required (owner/repo)"}), 400
+        try:
+            owner, repo = parse_owner_repo(repo_slug)
+            client = GitHubClient(token=token, owner=owner, repo=repo)
+            login = client.viewer_login()
+            if payload.get("create_repo"):
+                client.ensure_repo(private=bool(payload.get("private_repo", True)))
+            users.set_user_credentials(g.user_id, token, repo_slug)
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"login": login, "repo": f"{owner}/{repo}"})
+
+    @app.delete("/api/me/credentials")
+    @login_required
+    def api_clear_credentials():
+        users.clear_user_credentials(g.user_id)
+        return jsonify({"ok": True})
+
+    @app.post("/api/me/password")
+    @login_required
+    def api_change_password():
+        payload = request.get_json(force=True) or {}
+        current = payload.get("current_password") or ""
+        new = payload.get("new_password") or ""
+        if not users.verify_password(g.user_id, current):
+            return jsonify({"error": "Current password is incorrect."}), 401
+        try:
+            users.change_password(g.user_id, new)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"ok": True})
+
+    # ── archives (per user) ──────────────────────────────────────────────────
+
+    @app.get("/api/archives")
+    @login_required
+    def archives():
+        try:
+            client = _user_client(g.user_id)
+            result = list_remote_archives(client=client)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"archives": result})
+
+    @app.delete("/api/archives/<int:release_id>")
+    @login_required
+    def archive_delete(release_id: int):
+        try:
+            client = _user_client(g.user_id)
+            result = delete_archive(release_id=release_id, client=client)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(result)
+
+    # ── tasks (per user) ─────────────────────────────────────────────────────
+
+    @app.get("/api/tasks")
+    @login_required
+    def tasks():
+        return jsonify({"tasks": _list_tasks(g.user_id)})
+
+    @app.get("/api/tasks/<task_id>")
+    @login_required
+    def task(task_id: str):
+        task_data = _get_task(task_id, g.user_id)
+        if task_data is None:
+            return jsonify({"error": "Task not found"}), 404
+        return jsonify(task_data)
+
+    # ── upload (per user) ────────────────────────────────────────────────────
+
+    @app.post("/api/upload-files")
+    @login_required
+    def upload_files():
+        creds = users.get_user_credentials(g.user_id)
+        if not creds:
+            return jsonify({"error": "Configure your GitHub token first."}), 400
+
+        uploaded_files = request.files.getlist("files")
+        if not uploaded_files:
+            return jsonify({"error": "No files were uploaded"}), 400
+
+        relative_paths = request.form.getlist("relative_paths")
+        if relative_paths and len(relative_paths) != len(uploaded_files):
+            return jsonify({"error": "relative_paths count does not match uploaded files"}), 400
+
+        staging_root = Path(tempfile.mkdtemp(prefix="github-drive-web-upload-"))
+        saved_paths = []
+        for index, uploaded_file in enumerate(uploaded_files):
+            relative_path = relative_paths[index] if index < len(relative_paths) else uploaded_file.filename
+            relative_path = (relative_path or uploaded_file.filename or f"upload-{index}").strip().lstrip("/\\")
+            destination = staging_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            uploaded_file.save(destination)
+            saved_paths.append(destination)
+
+        if len(saved_paths) == 1 and not any(path and ("/" in path or "\\" in path) for path in relative_paths):
+            source_path = str(saved_paths[0])
+        else:
+            source_path = str(staging_root)
+
+        encrypt = request.form.get("encrypt", "false").lower() == "true"
+        task_id = _create_task(
+            "upload",
+            g.user_id,
+            {
+                "source_path": source_path,
+                "private_release": request.form.get("private_release", "false").lower() == "true",
+                "workers": int(request.form.get("workers", 4)),
+                "recursive": request.form.get("recursive", "true").lower() == "true",
+                "retries": int(request.form.get("retries", 3)),
+                "encrypt": encrypt,
+                "upload_mode": (request.form.get("upload_mode") or "auto").strip().lower() or "auto",
+                "resume_tag": (request.form.get("resume_tag") or "").strip() or None,
+                "cleanup_staging_root": str(staging_root),
+                "upload_origin": "browser-transfer",
+                "uploaded_file_count": len(saved_paths),
+            },
+        )
+        _start_task_thread(task_id, _run_upload_task)
+        return jsonify({"task_id": task_id})
+
+    # ── download (per user) ──────────────────────────────────────────────────
+
+    @app.post("/api/download")
+    @login_required
+    def download():
+        creds = users.get_user_credentials(g.user_id)
+        if not creds:
+            return jsonify({"error": "Configure your GitHub token first."}), 400
+
+        payload = request.get_json(force=True) or {}
+        release_id = payload.get("release_id")
+        tag = (payload.get("tag") or "").strip() or None
+        archive_id = (payload.get("archive_id") or "").strip() or None
+        if not (release_id or tag or archive_id):
+            return jsonify({"error": "release_id, tag, or archive_id is required"}), 400
+
+        temp_dir = tempfile.mkdtemp(prefix="github-drive-dl-")
+        task_id = _create_task(
+            "download",
+            g.user_id,
+            {
+                "release_id": int(release_id) if release_id else None,
+                "tag": tag,
+                "archive_id": archive_id,
+                "destination_dir": temp_dir,
+                "workers": int(payload.get("workers", 4)),
+                "skip_existing": False,
+                "retries": int(payload.get("retries", 3)),
+            },
+        )
+        with _DOWNLOAD_LOCK:
+            _DOWNLOAD_DIRS[task_id] = temp_dir
+
+        _start_task_thread(task_id, _run_download_task)
+        return jsonify({"task_id": task_id})
+
+    @app.get("/api/download-file/<task_id>")
+    @login_required
+    def download_file(task_id: str):
+        task = _get_task(task_id, g.user_id)
+        if task is None:
+            return jsonify({"error": "Task not found"}), 404
+        if task["status"] != "completed":
+            return jsonify({"error": "Task not yet completed"}), 409
+
+        with _DOWNLOAD_LOCK:
+            temp_dir = _DOWNLOAD_DIRS.get(task_id)
+        if not temp_dir or not Path(temp_dir).exists():
+            return jsonify({"error": "Download data is no longer available. Please re-download."}), 410
+
+        archive_title = (task.get("result") or {}).get("title") or "archive"
+        safe_name = re.sub(r"[^\w\s\-.]", "_", archive_title)[:80]
+        zip_dir = tempfile.mkdtemp(prefix="github-drive-web-zip-")
+        zip_path = Path(zip_dir) / f"{safe_name}.zip"
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+            base = Path(temp_dir)
+            for file_path in sorted(base.rglob("*")):
+                if file_path.is_file():
+                    zf.write(str(file_path), arcname=str(file_path.relative_to(base)))
+
+        def cleanup() -> None:
+            with _DOWNLOAD_LOCK:
+                _DOWNLOAD_DIRS.pop(task_id, None)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(zip_dir, ignore_errors=True)
+
+        response = send_file(
+            str(zip_path),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"{safe_name}.zip",
+        )
+        response.call_on_close(cleanup)
+        return response
+
+    return app
+
+
+# ── per-user GitHub client + encryption key resolution ───────────────────────
+
+
+def _user_client(username: str) -> GitHubClient:
+    creds = users.get_user_credentials(username)
+    if not creds:
+        raise RuntimeError("Configure your GitHub token first.")
+    if not creds.get("token") or not creds.get("owner") or not creds.get("repo"):
+        raise RuntimeError("Configure your GitHub token first.")
+    return GitHubClient(token=creds["token"], owner=creds["owner"], repo=creds["repo"])
+
+
+def _user_encode_key(username: str) -> Optional[bytes]:
+    return users.derive_user_archive_key(username)
+
+
+# ── task runners ──────────────────────────────────────────────────────────────
+
+
+def _run_upload_task(task_id: str) -> None:
+    task = _get_task_internal(task_id)
+    if task is None:
+        return
+    user_id = task.get("user_id") or ""
+    payload = dict(task["payload"])
+    cleanup_staging_root = payload.pop("cleanup_staging_root", None)
+    payload.pop("upload_origin", None)
+    payload.pop("uploaded_file_count", None)
+    encrypt = bool(payload.get("encrypt", False))
+    try:
+        client = _user_client(user_id)
+    except Exception as exc:
+        _update_task(task_id, status="failed", error=str(exc))
+        if cleanup_staging_root:
+            shutil.rmtree(cleanup_staging_root, ignore_errors=True)
+        return
+    if encrypt:
+        try:
+            payload["encode_key"] = _user_encode_key(user_id)
+        except Exception as exc:
+            _update_task(task_id, status="failed", error=str(exc))
+            if cleanup_staging_root:
+                shutil.rmtree(cleanup_staging_root, ignore_errors=True)
+            return
+    _update_task(task_id, status="running")
+    try:
+        result = upload_archive(
+            client=client,
+            progress=lambda event, data: _task_progress(task_id, event, data),
+            **payload,
+        )
+        _update_task(task_id, status="completed", result=_serialize(result))
+    except Exception as exc:
+        _update_task(task_id, status="failed", error=str(exc))
+    finally:
+        if cleanup_staging_root:
+            shutil.rmtree(cleanup_staging_root, ignore_errors=True)
+
+
+def _run_download_task(task_id: str) -> None:
+    task = _get_task_internal(task_id)
+    if task is None:
+        return
+    user_id = task.get("user_id") or ""
+    payload = dict(task["payload"])
+    try:
+        client = _user_client(user_id)
+    except Exception as exc:
+        _update_task(task_id, status="failed", error=str(exc))
+        with _DOWNLOAD_LOCK:
+            temp_dir = _DOWNLOAD_DIRS.pop(task_id, None)
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+    _update_task(task_id, status="running")
+    try:
+        try:
+            payload["encode_key"] = _user_encode_key(user_id)
+        except Exception:
+            payload["encode_key"] = None
+        result = download_archive(
+            client=client,
+            progress=lambda event, data: _task_progress(task_id, event, data),
+            **payload,
+        )
+        _update_task(task_id, status="completed", result=_serialize(result))
+    except Exception as exc:
+        _update_task(task_id, status="failed", error=str(exc))
+        with _DOWNLOAD_LOCK:
+            temp_dir = _DOWNLOAD_DIRS.pop(task_id, None)
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ── task helpers (per-user scoped) ────────────────────────────────────────────
+
+
+def _create_task(task_type: str, user_id: str, payload: Dict[str, Any]) -> str:
+    task_id = uuid.uuid4().hex[:12]
+    with _TASK_LOCK:
+        _TASKS[task_id] = {
+            "id": task_id,
+            "type": task_type,
+            "user_id": user_id,
+            "status": "queued",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "payload": payload,
+            "logs": [],
+            "result": None,
+            "error": None,
+            "progress_total": 0,
+            "progress_done": 0,
+        }
+    return task_id
+
+
+def _start_task_thread(task_id: str, runner) -> None:
+    thread = threading.Thread(target=runner, args=(task_id,), daemon=True)
+    thread.start()
+
+
+def _get_task_internal(task_id: str) -> Optional[Dict]:
+    with _TASK_LOCK:
+        task = _TASKS.get(task_id)
+        return _serialize(task) if task else None
+
+
+def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
+    task = _get_task_internal(task_id)
+    if task is None:
+        return None
+    if task.get("user_id") != user_id:
+        return None
+    return task
+
+
+def _list_tasks(user_id: str) -> List[Dict]:
+    with _TASK_LOCK:
+        tasks = [t for t in _TASKS.values() if t.get("user_id") == user_id]
+    tasks.sort(key=lambda t: t["created_at"], reverse=True)
+    return [_serialize(t) for t in tasks]
+
+
+def _update_task(task_id: str, **updates) -> None:
+    with _TASK_LOCK:
+        task = _TASKS.get(task_id)
+        if task is None:
+            return
+        task.update(updates)
+        task["updated_at"] = time.time()
+
+
+def _task_progress(task_id: str, event: str, payload: Dict[str, Any]) -> None:
+    message = _format_progress_message(event, payload)
+    with _TASK_LOCK:
+        task = _TASKS.get(task_id)
+        if task is None:
+            return
+        task["updated_at"] = time.time()
+        task["last_event"] = event
+        if event in {"archive_created", "archive_downloading"}:
+            task["progress_total"] = int(payload.get("total_items", 0))
+            task["progress_done"] = 0
+        elif event == "archive_resumed":
+            task["progress_total"] = int(payload.get("total_items", 0))
+            task["progress_done"] = int(payload.get("completed_items", 0))
+        elif event in {"item_uploaded", "item_downloaded", "item_skipped"}:
+            increment = int(payload.get("progress_increment", 1) or 1)
+            task["progress_done"] = int(task.get("progress_done", 0)) + increment
+        task["logs"].append({
+            "timestamp": time.time(),
+            "event": event,
+            "message": message,
+            "payload": payload,
+        })
+        task["logs"] = task["logs"][-200:]
+
+
+def _format_progress_message(event: str, payload: Dict[str, Any]) -> str:
+    if event == "archive_created":
+        return f"Created release {payload.get('tag') or payload.get('release_id')}"
+    if event == "archive_resumed":
+        return f"Resumed release {payload.get('release_id')} with {payload['completed_items']} completed item(s)"
+    if event == "archive_uploaded":
+        return f"Uploaded {payload['total_items']} item(s)"
+    if event == "archive_downloading":
+        return f"Downloading {payload['total_items']} item(s)"
+    if event == "archive_downloaded":
+        return f"Downloaded {payload['downloaded_items']} item(s)"
+    if event == "item_preparing":
+        return f"Preparing {payload['relative_path']}"
+    if event == "item_uploaded":
+        return f"Uploaded {payload['relative_path']}"
+    if event == "item_downloading":
+        return f"Downloading {payload['relative_path']}"
+    if event == "item_downloaded":
+        return f"Saved {payload['relative_path']}"
+    if event == "item_skipped":
+        return f"Skipped {payload['relative_path']}"
+    return f"{event}: {json.dumps(payload, ensure_ascii=True, default=str)}"
+
+
+def _serialize(value):
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {k: _serialize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize(v) for v in value]
+    return value
+
+
+def _asset_version() -> str:
+    static_dir = Path(__file__).parent / "static"
+    try:
+        latest = max(p.stat().st_mtime for p in static_dir.iterdir() if p.is_file())
+    except (OSError, ValueError):
+        return "0"
+    return str(int(latest))
+
+
+def _signup_disabled_response():
+    return render_template(
+        "login.html",
+        asset_version=_asset_version(),
+        allow_signup=False,
+        mode="login",
+        error="Signup is disabled on this server. Contact the administrator to create an account.",
+    ), 403
+
+
+# ── hosting helpers ──────────────────────────────────────────────────────────
+
+
+def _max_upload_bytes() -> int:
+    raw = os.environ.get("GITHUB_DRIVE_MAX_UPLOAD_BYTES")
+    if not raw:
+        return DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_UPLOAD_BYTES
+    return value if value > 0 else DEFAULT_MAX_UPLOAD_BYTES
+
+
+def _cookie_secure_default() -> bool:
+    """Mark the session cookie Secure on production-like hosts. Local dev stays http."""
+    if (os.environ.get("GITHUB_DRIVE_FORCE_SECURE_COOKIES") or "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    if os.environ.get("RENDER") or os.environ.get("DYNO") or os.environ.get("FLY_APP_NAME"):
+        return True
+    return False
+
+
+def _read_basic_auth_credentials() -> Optional[tuple]:
+    raw = (os.environ.get("GITHUB_DRIVE_BASIC_AUTH") or "").strip()
+    if not raw or ":" not in raw:
+        return None
+    user, password = raw.split(":", 1)
+    user = user.strip()
+    if not user or not password:
+        return None
+    return (user, password)
+
+
+def _make_basic_auth_guard(expected: tuple):
+    expected_user, expected_password = expected
+
+    def guard():
+        if request.path == "/healthz":
+            return None
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(header[len("Basic "):], validate=True).decode("utf-8")
+                user, _, password = decoded.partition(":")
+            except (ValueError, UnicodeDecodeError):
+                user = password = ""
+            if secrets.compare_digest(user, expected_user) and secrets.compare_digest(password, expected_password):
+                return None
+        return Response(
+            "Authentication required.",
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="github-drive", charset="UTF-8"'},
+        )
+
+    return guard
+
+
+# ── entry point ──────────────────────────────────────────────────────────────
+
+
+def run_web(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
+    _configure_runtime_noise()
+    port = int(os.environ.get("PORT", port))
+    app = create_app()
+    if open_browser:
+        import webbrowser
+        timer = threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}"))
+        timer.daemon = True
+        timer.start()
+    app.run(host=host, port=port, debug=False, threaded=True)
+
+
+def _configure_runtime_noise() -> None:
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", message=".*urllib3 v2 only supports OpenSSL 1.1.1.*")
