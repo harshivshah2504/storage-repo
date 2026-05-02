@@ -357,6 +357,73 @@ def create_app() -> Flask:
             headers={"Cache-Control": "private, max-age=600"},
         )
 
+    @app.get("/api/archives/<int:release_id>/download-entry")
+    @login_required
+    def archive_entry_download(release_id: int):
+        relative_path = _normalize_virtual_path(request.args.get("path") or "")
+        if not relative_path:
+            return jsonify({"error": "path is required"}), 400
+        kind = (request.args.get("kind") or "file").strip().lower()
+        if kind not in {"file", "folder"}:
+            return jsonify({"error": "kind must be file or folder"}), 400
+        try:
+            client = _user_client(g.user_id)
+            encode_key = _user_encode_key(g.user_id)
+            if kind == "file":
+                payload, content_type = read_archive_file(
+                    release_id=release_id,
+                    relative_path=relative_path,
+                    encode_key=encode_key,
+                    client=client,
+                )
+                return send_file(
+                    io.BytesIO(payload),
+                    mimetype=content_type or "application/octet-stream",
+                    as_attachment=True,
+                    download_name=Path(relative_path).name or "download",
+                    max_age=0,
+                )
+
+            contents = list_archive_contents(release_id=release_id, client=client)
+            prefix = f"{relative_path}/"
+            matched_entries = [
+                entry for entry in (contents.get("entries") or [])
+                if (entry.get("relative_path") or "").startswith(prefix)
+            ]
+            if not matched_entries:
+                return jsonify({"error": f"Folder {relative_path!r} was not found in this archive."}), 404
+
+            folder_name = Path(relative_path).name or "folder"
+            temp_dir = Path(tempfile.mkdtemp(prefix="github-drive-entry-zip-"))
+            zip_path = temp_dir / f"{_safe_download_name(folder_name)}.zip"
+            with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+                for entry in matched_entries:
+                    entry_path = entry.get("relative_path") or ""
+                    payload, _content_type = read_archive_file(
+                        release_id=release_id,
+                        relative_path=entry_path,
+                        encode_key=encode_key,
+                        client=client,
+                    )
+                    remainder = entry_path[len(prefix):].lstrip("/")
+                    if not remainder:
+                        continue
+                    archive.writestr(f"{folder_name}/{remainder}", payload)
+
+            response = send_file(
+                zip_path,
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=zip_path.name,
+                max_age=0,
+            )
+            response.call_on_close(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+            return response
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
     @app.delete("/api/archives/<int:release_id>/files")
     @login_required
     def archive_file_delete(release_id: int):
@@ -841,6 +908,15 @@ def _browser_upload_root_folder(relative_paths: List[str]) -> Optional[str]:
     if not saw_nested_path or not roots:
         return None
     return next(iter(roots))
+
+
+def _normalize_virtual_path(path: str) -> str:
+    return re.sub(r"[\\/]+", "/", str(path or "").strip()).strip("/")
+
+
+def _safe_download_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", str(value or "").strip()).strip(" .")
+    return cleaned or "download"
 
 
 # ── entry point ──────────────────────────────────────────────────────────────
