@@ -240,20 +240,26 @@
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="credsModalTitle">
         <div class="modal-header">
           <h2 class="modal-title" id="credsModalTitle">GitHub credentials</h2>
-          <p class="modal-subtitle">
+          <p class="modal-subtitle" id="credsModalSubtitle">
             Each account uses its own Personal Access Token and target repository.
             Create one at <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer">github.com/settings/tokens</a>
             with the <code>repo</code> scope.
           </p>
         </div>
         <form id="credsForm" class="modal-body">
-          <div class="field">
+          <div class="field" id="credsTokenField">
             <span class="field-label">Personal access token</span>
             <input class="text-input" type="password" name="token" placeholder="Leave blank to keep your saved GitHub token" autocomplete="off">
           </div>
+          <div class="field" id="credsSavedRepoField" style="display:none">
+            <span class="field-label">Saved repositories</span>
+            <select class="text-input" name="saved_repo" id="credsSavedRepoSelect">
+              <option value="">Choose a saved repo</option>
+            </select>
+          </div>
           <div class="field">
-            <span class="field-label">Target repository</span>
-            <input class="text-input" type="text" name="repo" placeholder="your-username/github-drive-archives" required>
+            <span class="field-label" id="credsRepoLabel">Target repository</span>
+            <input class="text-input" type="text" name="repo" id="credsRepoInput" placeholder="your-username/github-drive-archives">
           </div>
           <label class="checkbox-row">
             <input type="checkbox" name="create_repo">
