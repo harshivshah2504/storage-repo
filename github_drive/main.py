@@ -153,12 +153,48 @@ def cmd_users_list(_args):
     from . import users
 
     rows = users.list_users()
+    backend = users.backend_name()
+    print(f"# storage backend: {backend}")
     if not rows:
         print("No users registered. Add one with: github-drive users add <username>")
         return
     print(f"{'username':<24} {'created_at':<26} {'github_repo'}")
     for row in rows:
         print(f"{row['username']:<24} {row.get('created_at','')[:26]:<26} {row.get('repo','') or '(unset)'}")
+
+
+def cmd_users_backend(_args):
+    from . import users, db
+    from .users import USERS_FILE
+
+    print(f"Active backend: {users.backend_name()}")
+    if db.is_enabled():
+        h = db.health()
+        print(f"DATABASE_URL: configured")
+        print(f"DB connectivity: {'ok' if h.get('ok') else h.get('error', 'unknown')}")
+    else:
+        print("DATABASE_URL: not set (set GITHUB_DRIVE_DATABASE_URL or DATABASE_URL to enable Postgres)")
+    print(f"JSON file: {USERS_FILE} ({'exists' if USERS_FILE.exists() else 'missing'})")
+
+
+def cmd_users_migrate_db(_args):
+    from . import users, db
+
+    if not db.is_enabled():
+        print(
+            "GITHUB_DRIVE_DATABASE_URL is not set. Set it before running this command, e.g.\n"
+            "  export GITHUB_DRIVE_DATABASE_URL=postgres://user:pass@host:5432/db",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        result = users.migrate_json_to_db()
+    except Exception as exc:
+        print(f"Migration failed: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Inserted: {result['inserted']}")
+    print(f"Skipped (already in DB): {result['skipped']}")
+    print(f"Credentials copied: {result['credentials_copied']}")
 
 
 def cmd_users_add(args):
@@ -338,6 +374,18 @@ def build_parser():
     users_passwd.add_argument("username")
     users_passwd.add_argument("--password", default=None, help="new password (otherwise prompted)")
     users_passwd.set_defaults(handle=cmd_users_set_password)
+
+    users_backend = users_sub.add_parser(
+        "backend",
+        help="show which storage backend (json/postgres) is active and DB connectivity",
+    )
+    users_backend.set_defaults(handle=cmd_users_backend)
+
+    users_migrate = users_sub.add_parser(
+        "migrate-to-db",
+        help="copy users from the JSON file into the configured Postgres database",
+    )
+    users_migrate.set_defaults(handle=cmd_users_migrate_db)
 
     users_parser.set_defaults(handle=lambda _a: users_parser.print_help())
 

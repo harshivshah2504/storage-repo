@@ -97,9 +97,13 @@ def create_app() -> Flask:
     @app.get("/healthz")
     def healthz():
         status = state_status()
+        from . import db
+        db_health = db.health()
         return jsonify({
             "ok": True,
             "users": len(users.list_users()),
+            "backend": users.backend_name(),
+            "database": db_health,
             "state_dir": status["state_dir"],
             "state_dir_writable": status["state_dir_writable"],
             "using_render_disk": status["using_render_disk"],
