@@ -8,7 +8,7 @@ const state = {
   selectedArchiveContents: null,
   selectedArchivePath: "",
   activeDownloadTaskId: null,
-  me: { username: "", token_present: false, repo: "" },
+  me: { username: "", token_present: false, repo: "", repos: [], github_oauth_connected: false },
   toastDismissed: false,
   filters: { type: "all", modified: "any", sort: "newest" },
   viewMode: (typeof localStorage !== "undefined" && localStorage.getItem("gd_view_mode")) || "grid",
@@ -160,11 +160,50 @@ function applyMe(me) {
 
   $("popoverRepoLine").textContent = configured ? repo : "No GitHub repo configured";
   $("sidebarRepoLine").textContent = configured ? repo : "Not connected";
+  syncCredsModal();
 
   if (!configured) {
     // Force the user to set credentials before they can do anything else.
     openModal("credsModal");
   }
+}
+
+function syncCredsModal() {
+  const isOauthUser = Boolean(state.me.github_oauth_connected);
+  const tokenField = $("credsTokenField");
+  const subtitle = $("credsModalSubtitle");
+  const savedRepoField = $("credsSavedRepoField");
+  const savedRepoSelect = $("credsSavedRepoSelect");
+  const repoLabel = $("credsRepoLabel");
+  const repoInput = $("credsRepoInput");
+  const clearButton = $("clearCredsButton");
+  const repos = Array.isArray(state.me.repos) ? state.me.repos : [];
+  const activeRepo = state.me.repo || "";
+
+  if (tokenField) tokenField.style.display = isOauthUser ? "none" : "";
+  if (subtitle) {
+    subtitle.innerHTML = isOauthUser
+      ? "Your GitHub sign-in already provides the token. Choose a saved repository or add another <code>owner/repo</code>."
+      : "Each account uses its own Personal Access Token and target repository. Create one at <a href=\"https://github.com/settings/tokens\" target=\"_blank\" rel=\"noreferrer\">github.com/settings/tokens</a> with the <code>repo</code> scope.";
+  }
+  if (savedRepoField) savedRepoField.style.display = repos.length ? "" : "none";
+  if (savedRepoSelect) {
+    savedRepoSelect.innerHTML = ['<option value="">Choose a saved repo</option>']
+      .concat(repos.map((entry) => {
+        const slug = entry.slug || "";
+        const selected = slug === activeRepo ? " selected" : "";
+        const label = entry.active ? `${slug} (active)` : slug;
+        return `<option value="${escapeHtml(slug)}"${selected}>${escapeHtml(label)}</option>`;
+      }))
+      .join("");
+  }
+  if (repoLabel) repoLabel.textContent = repos.length ? "Add or switch repository" : "Target repository";
+  if (repoInput) {
+    repoInput.required = !repos.length;
+    repoInput.placeholder = repos.length ? "owner/repo for a new repo or leave blank to use a saved one" : "your-username/github-drive-archives";
+    repoInput.value = "";
+  }
+  if (clearButton) clearButton.textContent = isOauthUser ? "Disconnect" : "Forget";
 }
 
 function handleCredentialError(error) {
@@ -187,12 +226,15 @@ async function submitCreds(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const data = new FormData(form);
+  const repo = String(data.get("repo") || "").trim();
+  const savedRepo = String(data.get("saved_repo") || "").trim();
   try {
     const result = await fetchJson("/api/me/credentials", {
       method: "POST",
       body: JSON.stringify({
         token: data.get("token"),
-        repo: data.get("repo"),
+        repo,
+        saved_repo: savedRepo,
         create_repo: data.get("create_repo") === "on",
         private_repo: true,
       }),
@@ -209,7 +251,7 @@ async function submitCreds(event) {
 }
 
 async function clearCreds() {
-  if (!confirm("Forget the saved GitHub token? You'll need to enter it again.")) return;
+  if (!confirm("Disconnect the saved GitHub token and saved repositories for this account?")) return;
   try {
     await fetchJson("/api/me/credentials", { method: "DELETE" });
     closeModal("credsModal");
@@ -1277,6 +1319,7 @@ function setupNewMenu() {
   });
   $("openCredsFromMenu2").addEventListener("click", () => {
     menu.classList.remove("open");
+    syncCredsModal();
     openModal("credsModal");
   });
 }
@@ -1295,6 +1338,7 @@ function setupAccountMenu() {
   });
   $("openCredsFromMenuButton").addEventListener("click", () => {
     popover.classList.remove("open");
+    syncCredsModal();
     openModal("credsModal");
   });
 }
