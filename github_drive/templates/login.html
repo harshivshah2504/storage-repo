@@ -29,6 +29,7 @@
 
       {% if mode == 'signup' %}
         <form method="post" action="{{ url_for('signup_submit') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="field">
             <span class="field-label">Username</span>
             <input class="text-input" type="text" name="username" required autocomplete="username"
@@ -50,6 +51,7 @@
         </form>
       {% else %}
         <form method="post" action="{{ url_for('login_submit') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="field">
             <span class="field-label">Username</span>
             <input class="text-input" type="text" name="username" required autocomplete="username" autofocus>
