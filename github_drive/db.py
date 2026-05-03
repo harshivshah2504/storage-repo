@@ -72,14 +72,31 @@ def _open_pool():
     if not url:
         raise RuntimeError("No DATABASE_URL configured.")
 
+    # Connection-level kwargs.
+    #
+    # `prepare_threshold=None` disables psycopg 3's automatic prepared statements.
+    # This is necessary when the connection goes through a transaction-pooler such as
+    # Neon's `-pooler` endpoint or PgBouncer in transaction mode, where prepared
+    # statements survive across pooled connections and cause "prepared statement already
+    # exists" or first-query hangs. It is harmless on direct Postgres connections.
+    #
+    # `connect_timeout` makes a misconfigured URL fail fast (10 s) instead of hanging
+    # the request until the gunicorn worker timeout.
+    connect_kwargs = {
+        "autocommit": False,
+        "prepare_threshold": None,
+        "connect_timeout": 10,
+    }
+
     pool = ConnectionPool(
         _normalize_url(url),
         min_size=int(os.environ.get("GITHUB_DRIVE_DB_MIN_CONNECTIONS", "1")),
         max_size=int(os.environ.get("GITHUB_DRIVE_DB_MAX_CONNECTIONS", "10")),
-        kwargs={"autocommit": False},
+        kwargs=connect_kwargs,
+        timeout=15,                    # max wait when handing out a pooled connection
         open=False,
     )
-    pool.open(wait=True, timeout=10.0)
+    pool.open(wait=True, timeout=15.0)
     return pool
 
 
