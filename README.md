@@ -49,7 +49,7 @@ Inspect auth state:
 python -m github_drive auth-status
 ```
 
-The token is saved to `GITHUB_DRIVE_STATE_DIR/token.json` when that env var is set, otherwise `~/.github-drive/token.json` (chmod 600). You can also configure via env vars:
+The CLI token is saved to `GITHUB_DRIVE_STATE_DIR/token.json` when that env var is set, otherwise `~/.github-drive/token.json` (chmod 600). The web app does not mirror env tokens to disk unless you explicitly set `GITHUB_DRIVE_MIRROR_ENV_TOKEN=1`. You can also configure CLI auth via env vars:
 
 - `GITHUB_DRIVE_TOKEN` (or `GITHUB_TOKEN`)
 - `GITHUB_DRIVE_REPO` (e.g. `owner/repo`)
@@ -118,11 +118,11 @@ Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant
 | Concern | Behaviour |
 |---|---|
 | Account store | **Postgres** when `GITHUB_DRIVE_DATABASE_URL` (or `DATABASE_URL`) is set — strongly recommended for any hosted deployment. Schema is created on first connect. JSON file (`GITHUB_DRIVE_STATE_DIR/users.json`, otherwise `~/.github-drive/users.json`) is the local-dev fallback. Records are identical between backends; switch with `github-drive users migrate-to-db`. |
-| Session | Flask signed cookie, HttpOnly + SameSite=Lax. Lifetime: 14 days. Signed with `GITHUB_DRIVE_SESSION_SECRET`. |
+| Session | Flask signed cookie, HttpOnly + SameSite=Lax. Lifetime: 14 days. Signed with `GITHUB_DRIVE_SESSION_SECRET`. State-changing routes also require a CSRF token. |
 | GitHub PAT | Encrypted at rest with AES-128-GCM, key derived from `GITHUB_DRIVE_SESSION_SECRET` + username. Rotating the session secret invalidates stored PATs and forces every user to re-enter theirs. |
 | Encryption key for archive contents | Derived from `GITHUB_DRIVE_ENCRYPTION_KEY` (or session secret fallback) HMAC-mixed with the username, so two users on the same server cannot decrypt each other's archives. |
 | Tasks | Each task records its `user_id`; `/api/tasks` only returns the caller's. Background runners use the per-user PAT. |
-| Signup | **Always open.** Anyone reaching the URL can create an account at `/signup`. Combine with `GITHUB_DRIVE_BASIC_AUTH` if you want an outer gate (invite-only style). |
+| Signup | Controlled by `GITHUB_DRIVE_ALLOW_SIGNUP` (`true` by default for local/dev compatibility). For hosted deployments, set it to `false` after creating accounts with the CLI, or combine it with `GITHUB_DRIVE_BASIC_AUTH` as an outer gate. |
 
 ### External database (Postgres)
 
@@ -181,9 +181,12 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 |---|---|---|
 | `GITHUB_DRIVE_SESSION_SECRET` | yes (auto-generated otherwise) | Random 64-hex string used to sign Flask sessions. Render auto-generates it. May rotate freely once you have set `GITHUB_DRIVE_ENCRYPTION_KEY`. |
 | `GITHUB_DRIVE_ENCRYPTION_KEY` | required if you encrypt | Stable AES key (hex or base64, 16/24/32 bytes). Generate with `python -m github_drive gen-key`. Set once and pin — rotating it makes prior encrypted archives unreadable. |
-| `GITHUB_DRIVE_TOKEN` | recommended | GitHub PAT with `repo` scope. If set, the UI does not need to ask for it. |
-| `GITHUB_DRIVE_REPO` | recommended | Target repository as `owner/repo`. |
+| `GITHUB_DRIVE_TOKEN` | optional, CLI/operator use | GitHub PAT with `repo` scope. The multi-user web UI stores each user's PAT separately after login. |
+| `GITHUB_DRIVE_REPO` | optional, CLI/operator use | Target repository as `owner/repo`. |
 | `GITHUB_DRIVE_BASIC_AUTH` | optional outer gate | `user:password`. When set, every route (including `/login`) is wrapped in HTTP Basic. Useful as an outer perimeter on top of per-user logins; not a replacement for them. `/healthz` stays open for platform probes. |
+| `GITHUB_DRIVE_ALLOW_SIGNUP` | optional | `true`/`false`; defaults to `true`. Set to `false` on public hosted instances after provisioning users. The bundled Render blueprint sets this to `false`. |
+| `GITHUB_DRIVE_MIRROR_ENV_TOKEN` | optional, legacy | `1` to copy `GITHUB_DRIVE_TOKEN` into `token.json` at web startup. Leave unset for hosted multi-user deployments to avoid storing a plaintext operator PAT on disk. |
+| `GITHUB_DRIVE_ENABLE_DB_CHECK` | optional diagnostic | `1` to enable `/api/db-check` for signed-in users. It is disabled by default so public deployments do not expose database details. |
 | `GITHUB_DRIVE_USER_ID` | optional, legacy | Namespace for the legacy derivation. Only consulted when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPT` | optional | `1` to encrypt every web upload by default. |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | optional | Max single-request upload size. Default 5 GB. |
@@ -198,11 +201,11 @@ On Render, Fly.io, etc. the filesystem is wiped on every restart unless you moun
 
 For Render, mount a persistent disk and point `GITHUB_DRIVE_STATE_DIR` at it. The included [render.yaml](render.yaml) does this by mounting `/var/data` and storing app state in `/var/data/github-drive`. Without that, a newly created hosted user may be able to sign up once and then fail to log back in after the service restarts because their record is gone.
 
-You can verify the live service is using persistent state by opening `/healthz`. A healthy Render disk-backed deployment should report `"using_render_disk": true`, `"state_dir_writable": true`, and a `state_dir` under `/var/data/github-drive`. If it reports `false`, the app is still using ephemeral storage and the Render service needs a persistent disk attached or `GITHUB_DRIVE_STATE_DIR` corrected.
+`/healthz` is intentionally minimal and only returns `{"ok": true}` for platform liveness checks. For database diagnostics, temporarily set `GITHUB_DRIVE_ENABLE_DB_CHECK=1`, sign in, and open `/api/db-check`; disable it again after troubleshooting.
 
 ### Deploy targets
 
-**Render:** push the repo and click "New Blueprint" — Render reads `render.yaml`, provisions a 1 GB persistent disk at `/var/data`, sets `GITHUB_DRIVE_STATE_DIR=/var/data/github-drive`, generates `GITHUB_DRIVE_SESSION_SECRET`, and prompts you for the rest. Health check at `/healthz`.
+**Render:** push the repo and click "New Blueprint" — Render reads `render.yaml`, provisions Postgres, generates `GITHUB_DRIVE_SESSION_SECRET`, disables public signup by default, and prompts you for the rest. Health check at `/healthz`.
 
 **Docker (any host):**
 
@@ -280,13 +283,16 @@ Uploading 10,000 small files as 10,000 separate release assets is slow and burns
 
 | Variable | Purpose |
 |---|---|
-| `GITHUB_DRIVE_TOKEN` | GitHub PAT with `repo` scope |
-| `GITHUB_DRIVE_REPO` | Target archives repo as `owner/repo` |
+| `GITHUB_DRIVE_TOKEN` | Optional CLI/operator PAT with `repo` scope |
+| `GITHUB_DRIVE_REPO` | Optional CLI/operator target archives repo as `owner/repo` |
 | `GITHUB_DRIVE_SESSION_SECRET` | Required by the web app for Flask sessions. Auto-generated if missing (warns). Also used as the legacy fallback for encryption key derivation when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPTION_KEY` | Stable AES key (hex or base64, 16/24/32 bytes). Survives redeploys, unlike the session secret. |
 | `GITHUB_DRIVE_USER_ID` | Optional namespace for the derived encryption key (default `default`) |
 | `GITHUB_DRIVE_ENCRYPT` | Set to `1`/`true` to encrypt all uploads from the web flow |
 | `GITHUB_DRIVE_ENCRYPTION_KEY` | Optional CLI fallback if `--key` is not passed |
 | `GITHUB_DRIVE_BASIC_AUTH` | `user:password` to gate the web app behind HTTP Basic |
+| `GITHUB_DRIVE_ALLOW_SIGNUP` | `true`/`false`; disable on public hosted instances after provisioning users |
+| `GITHUB_DRIVE_MIRROR_ENV_TOKEN` | Legacy opt-in to write env PATs to `token.json`; leave unset for multi-user hosting |
+| `GITHUB_DRIVE_ENABLE_DB_CHECK` | Opt-in database diagnostic endpoint for signed-in users |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | Max bytes per upload request (default 5 GB) |
 | `GITHUB_DRIVE_CHUNK_BYTES` | Per-chunk upload size when splitting large files (default ~1.9 GB) |

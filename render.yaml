@@ -29,5 +29,7 @@ services:
         sync: false
       - key: GITHUB_DRIVE_BASIC_AUTH
         sync: false
+      - key: GITHUB_DRIVE_ALLOW_SIGNUP
+        value: "false"
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
         sync: false
