@@ -11,7 +11,16 @@ const state = {
   me: { username: "", token_present: false, repo: "" },
   toastDismissed: false,
   filters: { type: "all", modified: "any", sort: "newest" },
+  viewMode: (typeof localStorage !== "undefined" && localStorage.getItem("gd_view_mode")) || "grid",
 };
+
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".log",
+  ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
+  ".go", ".rs", ".rb", ".php", ".sh", ".html", ".css",
+]);
+const PDF_EXTENSIONS = new Set([".pdf"]);
+const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
 
 const FILTER_OPTIONS = {
   type: [
@@ -58,10 +67,12 @@ const CODE_EXTENSIONS = new Set([".py", ".js", ".ts", ".tsx", ".jsx", ".java", "
 // ── Network helper ────────────────────────────────────────────────────────────
 
 async function fetchJson(url, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (window.__GD_CSRF_TOKEN__) headers["X-CSRF-Token"] = window.__GD_CSRF_TOKEN__;
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
     ...options,
+    headers,
   });
   if (response.status === 401) {
     window.location.href = "/login";
@@ -407,9 +418,12 @@ function renderArchives() {
   applyFiltersAndSort();
   const grid = $("archivesGrid");
   const empty = $("archivesEmpty");
+  // List view always renders alongside the grid; toggle handles visibility.
+  renderArchivesList(state.filteredArchives);
   if (!state.filteredArchives.length) {
     grid.innerHTML = "";
-    grid.style.display = "none";
+    show("archivesGrid", false);
+    show("archivesList", false);
     empty.style.display = "";
     if (state.archives.length) {
       empty.querySelector("h2").textContent = "No matches";
@@ -421,7 +435,7 @@ function renderArchives() {
     return;
   }
   empty.style.display = "none";
-  grid.style.display = "";
+  applyViewMode(state.viewMode);
   grid.innerHTML = state.filteredArchives.map((archive, index) => {
     const meta = archive.archive || {};
     const title = archiveTitle(archive);
@@ -464,6 +478,11 @@ function renderArchives() {
     card.addEventListener("click", () => {
       const archive = state.filteredArchives[Number(card.dataset.index)];
       openArchiveDetail(archive);
+    });
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const archive = state.filteredArchives[Number(card.dataset.index)];
+      if (archive) showArchiveContextMenu(event.clientX, event.clientY, archive);
     });
   });
 }
@@ -696,9 +715,21 @@ function renderArchiveContents() {
   });
   grid.querySelectorAll("[data-file-path]").forEach((card) => {
     card.addEventListener("click", () => {
-      if (card.dataset.previewable !== "1") return;
       const entry = (contents.entries || []).find((item) => item.relative_path === card.dataset.filePath);
-      if (entry) openImagePreview(entry);
+      if (entry) openPreview(entry);
+    });
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const entry = (contents.entries || []).find((item) => item.relative_path === card.dataset.filePath);
+      if (entry) showEntryContextMenu(event.clientX, event.clientY, entry);
+    });
+  });
+  grid.querySelectorAll("[data-folder-path]").forEach((card) => {
+    card.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const path = card.dataset.folderPath || "";
+      const entry = { relative_path: path, kind: "folder" };
+      showEntryContextMenu(event.clientX, event.clientY, entry);
     });
   });
   grid.querySelectorAll("[data-delete-path]").forEach((button) => {
@@ -745,13 +776,69 @@ async function loadSelectedArchiveContents() {
   renderArchiveContents();
 }
 
-function openImagePreview(file) {
+function previewKindFor(file) {
+  const ext = ("." + (file.relative_path || "").split(".").pop() || "").toLowerCase();
+  if (file.kind === "folder") return "folder";
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (VIDEO_EXTENSIONS.has(ext)) return "video";
+  if (AUDIO_EXTENSIONS.has(ext)) return "audio";
+  if (PDF_EXTENSIONS.has(ext)) return "pdf";
+  if (TEXT_PREVIEW_EXTENSIONS.has(ext)) return "text";
+  return "other";
+}
+
+async function openPreview(file) {
   const archive = state.selectedArchive;
-  if (!archive) return;
-  $("imagePreviewTitle").textContent = basename(file.relative_path);
-  $("imagePreviewMeta").textContent = `${KIND_LABEL[file.kind] || "File"} · ${formatBytes(file.original_size || 0)}`;
-  $("imagePreviewImage").src = archiveFileUrl(archive.release_id, file.relative_path, false);
-  openModal("imagePreviewModal");
+  if (!archive || !file || file.kind === "folder") return;
+  const url = archiveFileUrl(archive.release_id, file.relative_path, false);
+  const downloadUrl = archiveEntryDownloadUrl(archive.release_id, file.relative_path, "file");
+  const name = basename(file.relative_path);
+  const kind = previewKindFor(file);
+  const sizeLabel = formatBytes(file.original_size || 0);
+
+  $("previewName").textContent = name;
+  $("previewMeta").textContent = `${KIND_LABEL[file.kind] || "File"} · ${sizeLabel}`;
+  const dl = $("previewDownloadButton");
+  dl.href = downloadUrl;
+  dl.setAttribute("download", name);
+
+  const body = $("previewBody");
+  body.innerHTML = `<div class="preview-spinner" aria-hidden="true"></div>`;
+  $("previewBackdrop").classList.add("open");
+
+  if (kind === "image") {
+    body.innerHTML = `<img alt="${escapeHtml(name)}" src="${escapeHtml(url)}">`;
+  } else if (kind === "video") {
+    body.innerHTML = `<video controls preload="metadata" src="${escapeHtml(url)}"></video>`;
+  } else if (kind === "audio") {
+    body.innerHTML = `<audio controls preload="metadata" src="${escapeHtml(url)}"></audio>`;
+  } else if (kind === "pdf") {
+    body.innerHTML = `<iframe title="${escapeHtml(name)}" src="${escapeHtml(url)}"></iframe>`;
+  } else if (kind === "text") {
+    try {
+      const response = await fetch(url, { credentials: "same-origin" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const buf = await response.arrayBuffer();
+      const slice = buf.slice(0, TEXT_PREVIEW_MAX_BYTES);
+      const decoder = new TextDecoder("utf-8", { fatal: false });
+      let text = decoder.decode(slice);
+      if (buf.byteLength > TEXT_PREVIEW_MAX_BYTES) {
+        text += `\n\n--- truncated (${formatBytes(buf.byteLength - TEXT_PREVIEW_MAX_BYTES)} more) ---`;
+      }
+      body.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+    } catch (error) {
+      body.innerHTML = `<div class="preview-fallback">Could not load preview: ${escapeHtml(error.message)}<br><br><a class="btn btn-primary" href="${escapeHtml(downloadUrl)}" download>Download</a></div>`;
+    }
+  } else {
+    body.innerHTML = `<div class="preview-fallback">Preview not available for this file type.<br><br><a class="btn btn-primary" href="${escapeHtml(downloadUrl)}" download>Download</a></div>`;
+  }
+}
+
+function closePreview() {
+  const backdrop = $("previewBackdrop");
+  backdrop.classList.remove("open");
+  // Stop video/audio playback by emptying the body.
+  $("previewBody").innerHTML = "";
 }
 
 async function deleteArchiveEntry(relativePath) {
@@ -905,9 +992,7 @@ function renderTasks(tasks) {
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : (task.status === "completed" ? 100 : 0);
 
     const label = task.type === "upload"
-      ? (payload.upload_origin === "browser-transfer"
-          ? `${payload.uploaded_file_count || 0} file${(payload.uploaded_file_count || 0) === 1 ? "" : "s"}`
-          : (payload.source_path || "Upload"))
+      ? uploadTaskLabel(payload)
       : (result.title || payload.tag || `release ${payload.release_id || ""}`);
     const icon = task.type === "upload"
       ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>`
@@ -952,6 +1037,109 @@ async function loadTasks() {
 
 // ── Upload ────────────────────────────────────────────────────────────────────
 
+function uploadTaskLabel(payload) {
+  if (payload.upload_origin !== "browser-transfer") return payload.source_path || "Upload";
+  const count = Number(payload.uploaded_file_count || 0);
+  const countLabel = `${count} file${count === 1 ? "" : "s"}`;
+  const sourceName = payload.source_name_override || "";
+  return sourceName ? `${sourceName} - ${countLabel}` : countLabel;
+}
+
+function normalizeUploadRelativePath(path) {
+  return String(path || "")
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+}
+
+function uploadRelativePathForFile(file) {
+  return normalizeUploadRelativePath(file.webkitRelativePath || file.name || "upload");
+}
+
+function groupFilesForUpload(files) {
+  const groups = new Map();
+  let looseFileIndex = 0;
+  for (const file of files) {
+    const relativePath = uploadRelativePathForFile(file);
+    const parts = relativePath.split("/").filter(Boolean);
+    const folderRoot = parts.length > 1 ? parts[0] : "";
+    const entry = { file, relativePath: relativePath || file.name || "upload" };
+    if (!folderRoot) {
+      groups.set(`file:${looseFileIndex}`, {
+        key: `file:${looseFileIndex}`,
+        type: "file",
+        name: basename(entry.relativePath) || file.name || "File",
+        entries: [entry],
+      });
+      looseFileIndex += 1;
+      continue;
+    }
+
+    const key = `folder:${folderRoot}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        type: "folder",
+        name: folderRoot,
+        entries: [],
+      });
+    }
+    groups.get(key).entries.push(entry);
+  }
+  return Array.from(groups.values());
+}
+
+function makeUploadFormData(uploadForm, group) {
+  const formData = new FormData(uploadForm);
+  formData.set("encrypt", uploadForm.querySelector('input[name="encrypt"]').checked ? "true" : "false");
+  formData.append("retries", "3");
+  formData.append("recursive", "true");
+
+  for (const entry of group.entries) {
+    formData.append("files", entry.file, entry.file.name);
+    formData.append("relative_paths", entry.relativePath);
+  }
+  return formData;
+}
+
+async function uploadFileGroup(group, uploadForm) {
+  const formData = makeUploadFormData(uploadForm, group);
+  const headers = {};
+  if (window.__GD_CSRF_TOKEN__) headers["X-CSRF-Token"] = window.__GD_CSRF_TOKEN__;
+  const response = await fetch("/api/upload-files", { method: "POST", body: formData, headers, credentials: "same-origin" });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Login required");
+  }
+  let payload = {};
+  try { payload = await response.json(); } catch (_) {}
+  if (!response.ok) {
+    throw new Error(payload.error || `${group.name} upload failed (${response.status})`);
+  }
+  return payload;
+}
+
+async function uploadFileGroups(groups, uploadForm) {
+  const results = new Array(groups.length);
+  let nextIndex = 0;
+  const concurrency = Math.min(3, groups.length);
+
+  async function worker() {
+    while (nextIndex < groups.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await uploadFileGroup(groups[index], uploadForm) };
+      } catch (error) {
+        results[index] = { status: "rejected", reason: error };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return results;
+}
+
 async function uploadSelectedFiles(files) {
   if (!files.length) return;
   if (!state.me.token_present || !state.me.repo) {
@@ -960,23 +1148,15 @@ async function uploadSelectedFiles(files) {
   }
 
   const uploadForm = $("uploadForm");
-  const formData = new FormData(uploadForm);
-  formData.set("encrypt", uploadForm.querySelector('input[name="encrypt"]').checked ? "true" : "false");
-  formData.append("retries", "3");
-  formData.append("recursive", "true");
-
-  for (const file of files) {
-    formData.append("files", file, file.name);
-    formData.append("relative_paths", file.webkitRelativePath || file.name);
-  }
+  const groups = groupFilesForUpload(files);
 
   showTransferToast();
-  const response = await fetch("/api/upload-files", { method: "POST", body: formData, credentials: "same-origin" });
-  if (response.status === 401) { window.location.href = "/login"; return; }
-  let payload = {};
-  try { payload = await response.json(); } catch (_) {}
-  if (!response.ok) throw new Error(payload.error || `Upload failed (${response.status})`);
+  const results = await uploadFileGroups(groups, uploadForm);
   await loadTasks();
+  const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length) {
+    throw new Error(failures.map((failure) => failure.reason.message).join("\n"));
+  }
 }
 
 // ── Sidebar + topbar interactions ─────────────────────────────────────────────
@@ -1071,6 +1251,236 @@ function setupRefresh() {
   });
 }
 
+// ── View toggle (grid / list) ────────────────────────────────────────────────
+
+function setupViewToggle() {
+  applyViewMode(state.viewMode);
+  $("viewToggle").addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-view]");
+    if (!btn) return;
+    const mode = btn.dataset.view;
+    if (mode === state.viewMode) return;
+    state.viewMode = mode;
+    try { localStorage.setItem("gd_view_mode", mode); } catch (_) { /* ignore */ }
+    applyViewMode(mode);
+    renderArchives();
+  });
+}
+
+function applyViewMode(mode) {
+  $("viewToggle").querySelectorAll("button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === mode);
+  });
+  show("archivesGrid", mode === "grid");
+  show("archivesList", mode === "list");
+}
+
+function renderArchivesList(archives) {
+  const body = $("archivesListBody");
+  if (!archives.length) { body.innerHTML = ""; return; }
+  body.innerHTML = archives.map((archive, index) => {
+    const meta = archive.archive || {};
+    const title = archiveTitle(archive);
+    const count = archiveItemCount(archive);
+    const created = formatDate(meta.created_at || archive.created_at || "");
+    const kind = dominantKind(archive);
+    const kindLabel = KIND_LABEL[kind] || "Files";
+    return `
+      <div class="list-row" data-index="${index}">
+        <div class="row-icon">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>
+        <div>${escapeHtml(title)}</div>
+        <div>${count} item${count === 1 ? "" : "s"}</div>
+        <div>${escapeHtml(created)}</div>
+        <div><code>${escapeHtml(archive.tag)}</code></div>
+        <div>${escapeHtml(kindLabel)}</div>
+      </div>
+    `;
+  }).join("");
+  body.querySelectorAll(".list-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const archive = state.filteredArchives[Number(row.dataset.index)];
+      if (archive) openArchiveDetail(archive);
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const archive = state.filteredArchives[Number(row.dataset.index)];
+      if (archive) showArchiveContextMenu(event.clientX, event.clientY, archive);
+    });
+  });
+}
+
+// ── Drag-and-drop upload ─────────────────────────────────────────────────────
+
+function setupDragAndDrop() {
+  const overlay = $("dropOverlay");
+  let depth = 0;
+  const isDragWithFiles = (event) => Array.from(event.dataTransfer?.types || []).includes("Files");
+
+  window.addEventListener("dragenter", (event) => {
+    if (!isDragWithFiles(event)) return;
+    event.preventDefault();
+    depth += 1;
+    overlay.classList.add("active");
+  });
+  window.addEventListener("dragover", (event) => {
+    if (!isDragWithFiles(event)) return;
+    event.preventDefault();
+  });
+  window.addEventListener("dragleave", (event) => {
+    if (!isDragWithFiles(event)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) overlay.classList.remove("active");
+  });
+  window.addEventListener("drop", async (event) => {
+    if (!isDragWithFiles(event)) return;
+    event.preventDefault();
+    depth = 0;
+    overlay.classList.remove("active");
+    const files = await collectDroppedFiles(event.dataTransfer);
+    if (files.length === 0) return;
+    try {
+      await uploadSelectedFiles(files);
+    } catch (error) {
+      alert(error.message);
+    }
+  });
+}
+
+async function collectDroppedFiles(dataTransfer) {
+  // Prefer the modern items[] API so we can recurse into dropped folders.
+  const items = dataTransfer && dataTransfer.items ? Array.from(dataTransfer.items) : [];
+  const collected = [];
+  if (items.length && items[0].webkitGetAsEntry) {
+    const entries = items.map((item) => item.webkitGetAsEntry()).filter(Boolean);
+    await Promise.all(entries.map((entry) => walkEntry(entry, "", collected)));
+    return collected;
+  }
+  // Fallback: flat list of files.
+  return Array.from(dataTransfer.files || []);
+}
+
+function walkEntry(entry, pathPrefix, collected) {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file((file) => {
+        // Mimic webkitRelativePath so uploadSelectedFiles produces the right relative_paths.
+        const relative = pathPrefix ? `${pathPrefix}${file.name}` : file.name;
+        try { Object.defineProperty(file, "webkitRelativePath", { value: relative }); }
+        catch (_) { /* ignore on older browsers */ }
+        collected.push(file);
+        resolve();
+      }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const all = [];
+      const readBatch = () => {
+        reader.readEntries(async (entries) => {
+          if (!entries.length) {
+            await Promise.all(all.map((child) => walkEntry(child, `${pathPrefix}${entry.name}/`, collected)));
+            resolve();
+          } else {
+            all.push(...entries);
+            readBatch();
+          }
+        }, () => resolve());
+      };
+      readBatch();
+    } else {
+      resolve();
+    }
+  });
+}
+
+// ── Right-click context menu ─────────────────────────────────────────────────
+
+function setupContextMenu() {
+  document.addEventListener("click", () => closeContextMenu());
+  document.addEventListener("scroll", () => closeContextMenu(), true);
+  window.addEventListener("resize", () => closeContextMenu());
+}
+
+function closeContextMenu() { $("contextMenu").classList.remove("open"); }
+
+function buildContextMenu(items, x, y) {
+  const menu = $("contextMenu");
+  menu.innerHTML = items.map((item, i) => {
+    if (item.divider) return `<div class="divider" data-i="${i}"></div>`;
+    return `<button type="button" class="${item.destructive ? "destructive" : ""}" data-i="${i}">
+      ${item.icon || ""}<span>${escapeHtml(item.label)}</span>
+    </button>`;
+  }).join("");
+  menu.querySelectorAll("button[data-i]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeContextMenu();
+      const item = items[Number(btn.dataset.i)];
+      if (item && item.onClick) item.onClick();
+    });
+  });
+  // Position, keeping inside viewport.
+  menu.classList.add("open");
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - rect.width - 8);
+  const top = Math.min(y, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+}
+
+const ICON_OPEN = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`;
+const ICON_DOWNLOAD = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
+const ICON_DELETE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+const ICON_LINK = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3.9 12a3.1 3.1 0 0 1 3.1-3.1h4V7H7a5 5 0 0 0 0 10h4v-1.9H7A3.1 3.1 0 0 1 3.9 12zM8 13h8v-2H8v2zm9-6h-4v1.9h4a3.1 3.1 0 0 1 0 6.2h-4V17h4a5 5 0 0 0 0-10z"/></svg>`;
+
+function showArchiveContextMenu(x, y, archive) {
+  const items = [
+    { label: "Open", icon: ICON_OPEN, onClick: () => openArchiveDetail(archive) },
+    { label: "Download archive", icon: ICON_DOWNLOAD, onClick: () => {
+        state.selectedArchive = archive;
+        startDownload();
+      } },
+    { label: "View on GitHub", icon: ICON_LINK, onClick: () => {
+        if (archive.html_url) window.open(archive.html_url, "_blank");
+      } },
+    { divider: true },
+    { label: "Delete archive", icon: ICON_DELETE, destructive: true, onClick: async () => {
+        if (!confirm(`Delete "${archiveTitle(archive)}" permanently?`)) return;
+        try {
+          await fetchJson(`/api/archives/${archive.release_id}`, { method: "DELETE" });
+          await loadArchives();
+        } catch (error) { alert(error.message); }
+      } },
+  ];
+  buildContextMenu(items, x, y);
+}
+
+function showEntryContextMenu(x, y, entry) {
+  const archive = state.selectedArchive;
+  if (!archive) return;
+  const isFolder = entry.kind === "folder";
+  const items = [
+    !isFolder && { label: "Preview", icon: ICON_OPEN, onClick: () => openPreview(entry) },
+    { label: isFolder ? "Download as ZIP" : "Download", icon: ICON_DOWNLOAD, onClick: () => {
+        downloadSelectedEntry(entry.relative_path, isFolder ? "folder" : "file");
+      } },
+    !isFolder && { divider: true },
+    !isFolder && { label: "Delete file", icon: ICON_DELETE, destructive: true, onClick: () => deleteArchiveEntry(entry.relative_path) },
+  ].filter(Boolean);
+  buildContextMenu(items, x, y);
+}
+
+// ── Preview backdrop close handlers ──────────────────────────────────────────
+
+function setupPreviewBackdrop() {
+  const backdrop = $("previewBackdrop");
+  $("previewCloseButton").addEventListener("click", closePreview);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) closePreview();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && backdrop.classList.contains("open")) closePreview();
+  });
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -1082,6 +1492,10 @@ async function init() {
   setupFilePickers();
   setupTransferToast();
   setupRefresh();
+  setupViewToggle();
+  setupDragAndDrop();
+  setupContextMenu();
+  setupPreviewBackdrop();
   $("credsForm").addEventListener("submit", submitCreds);
   $("clearCredsButton").addEventListener("click", clearCreds);
   $("startDownloadButton").addEventListener("click", startDownload);
