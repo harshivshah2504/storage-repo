@@ -33,7 +33,9 @@ from typing import Dict, Iterable, List, Optional
 
 LOG = logging.getLogger("github_drive.db")
 
-_LOCK = threading.Lock()
+# Schema creation can open the pool while already holding the DB guard.
+# Use an RLock so the same thread can safely enter get_pool() from ensure_schema().
+_LOCK = threading.RLock()
 _POOL = None
 _INITIALIZED = False
 
