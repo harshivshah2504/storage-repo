@@ -45,6 +45,18 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.62-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.488.488 0 0 0-.49-.41h-3.84c-.24 0-.45.17-.49.42l-.36 2.54c-.59.24-1.13.55-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.04.32-.06.63-.06.94 0 .31.02.62.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.39.31.62.22l2.39-.96c.5.39 1.03.7 1.62.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .45-.17.49-.41l.36-2.54c.59-.24 1.13-.55 1.62-.94l2.39.96c.22.09.49 0 .61-.22l1.92-3.32c.12-.22.07-.49-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
                 Manage GitHub credentials
               </button>
+              <button type="button" id="exportAccountButton">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M5 20h14v-2H5v2zm7-18-5.5 5.5h3.5V16h4V7.5H17.5L12 2z"/></svg>
+                Export account data
+              </button>
+              <button type="button" id="reportAbuseButton">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 16h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+                Report abuse
+              </button>
+              <button type="button" id="deleteAccountButton">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                Delete account
+              </button>
               <form method="post" action="{{ url_for('logout') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit">
@@ -237,7 +249,7 @@
         <form id="credsForm" class="modal-body">
           <div class="field">
             <span class="field-label">Personal access token</span>
-            <input class="text-input" type="password" name="token" placeholder="ghp_... or github_pat_..." required autocomplete="off">
+            <input class="text-input" type="password" name="token" placeholder="Leave blank to keep your saved GitHub token" autocomplete="off">
           </div>
           <div class="field">
             <span class="field-label">Target repository</span>
