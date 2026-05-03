@@ -406,10 +406,12 @@ def create_app() -> Flask:
         payload = request.get_json(force=True) or {}
         token = (payload.get("token") or "").strip()
         repo_slug = (payload.get("repo") or "").strip()
-        if not repo_slug or "/" not in repo_slug:
+        saved_repo_slug = (payload.get("saved_repo") or "").strip()
+        target_repo_slug = repo_slug or saved_repo_slug
+        if not target_repo_slug or "/" not in target_repo_slug:
             return jsonify({"error": "repo is required (owner/repo)"}), 400
         try:
-            owner, repo = parse_owner_repo(repo_slug)
+            owner, repo = parse_owner_repo(target_repo_slug)
             if not token:
                 existing = users.get_user_credentials(g.user_id)
                 token = (existing or {}).get("token", "")
@@ -417,12 +419,12 @@ def create_app() -> Flask:
                 return jsonify({"error": "token is required"}), 400
             client = GitHubClient(token=token, owner=owner, repo=repo)
             login = client.viewer_login()
-            if payload.get("create_repo"):
+            if payload.get("create_repo") and repo_slug:
                 client.ensure_repo(private=bool(payload.get("private_repo", True)))
-            users.set_user_repo(g.user_id, repo_slug, token=token)
+            users.set_user_repo(g.user_id, target_repo_slug, token=token)
         except Exception as exc:
             return _credential_error_response(exc)
-        return jsonify({"login": login, "repo": f"{owner}/{repo}"})
+        return jsonify({"login": login, "repo": f"{owner}/{repo}", "repos": users.list_user_repos(g.user_id)})
 
     @app.delete("/api/me/credentials")
     @login_required

@@ -31,6 +31,16 @@ github_oauth_accounts (
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 
+github_repositories (
+  username    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  owner       TEXT NOT NULL,
+  repo        TEXT NOT NULL,
+  is_active   BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (username, owner, repo)
+)
+
 web_tasks (
   id            TEXT PRIMARY KEY,
   user_id       TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
@@ -217,6 +227,19 @@ def ensure_schema() -> None:
                 )
                 cur.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS github_repositories (
+                      username    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                      owner       TEXT NOT NULL,
+                      repo        TEXT NOT NULL,
+                      is_active   BOOLEAN NOT NULL DEFAULT FALSE,
+                      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                      PRIMARY KEY (username, owner, repo)
+                    )
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS web_tasks (
                       id             TEXT PRIMARY KEY,
                       user_id        TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
@@ -243,6 +266,17 @@ def ensure_schema() -> None:
                       details     TEXT NOT NULL,
                       created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO github_repositories (username, owner, repo, is_active)
+                    SELECT username, owner, repo, TRUE
+                    FROM github_credentials
+                    WHERE owner <> '' AND repo <> ''
+                    ON CONFLICT (username, owner, repo) DO UPDATE
+                    SET is_active = TRUE,
+                        updated_at = NOW()
                     """
                 )
             conn.commit()
@@ -389,6 +423,25 @@ def upsert_credentials(username: str, token_encrypted: str, owner: str, repo: st
                 """,
                 (username, token_encrypted, owner, repo),
             )
+            if owner and repo:
+                cur.execute(
+                    """
+                    UPDATE github_repositories
+                    SET is_active = FALSE
+                    WHERE username = %s
+                    """,
+                    (username,),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO github_repositories (username, owner, repo, is_active)
+                    VALUES (%s, %s, %s, TRUE)
+                    ON CONFLICT (username, owner, repo) DO UPDATE
+                    SET is_active = TRUE,
+                        updated_at = NOW()
+                    """,
+                    (username, owner, repo),
+                )
         conn.commit()
 
 
@@ -400,7 +453,63 @@ def clear_credentials(username: str) -> None:
                 "DELETE FROM github_credentials WHERE username = %s",
                 (username,),
             )
+            cur.execute(
+                "DELETE FROM github_repositories WHERE username = %s",
+                (username,),
+            )
         conn.commit()
+
+
+def list_user_repositories(username: str) -> List[Dict]:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT owner, repo, is_active, updated_at
+                FROM github_repositories
+                WHERE username = %s
+                ORDER BY is_active DESC, updated_at DESC, owner ASC, repo ASC
+                """,
+                (username,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "owner": row[0],
+            "repo": row[1],
+            "slug": f"{row[0]}/{row[1]}",
+            "active": bool(row[2]),
+            "updated_at": row[3].isoformat() if row[3] else "",
+        }
+        for row in rows
+    ]
+
+
+def get_oauth_account_for_username(username: str) -> Optional[Dict]:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT github_id, username, github_login, email, updated_at
+                FROM github_oauth_accounts
+                WHERE username = %s
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "github_id": row[0],
+        "username": row[1],
+        "github_login": row[2],
+        "email": row[3] or "",
+        "updated_at": row[4].isoformat() if row[4] else "",
+    }
 
 
 def get_oauth_account(github_id: str) -> Optional[Dict]:

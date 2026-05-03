@@ -205,7 +205,7 @@ def set_user_repo(username: str, repo_slug: str, token: Optional[str] = None) ->
 
 
 def get_user_credentials(username: str) -> Optional[Dict]:
-    """Return {token, owner, repo} for the user, or None if no PAT is configured."""
+    """Return {token, owner, repo, repos} for the user, or None if no token is configured."""
     norm = normalize_username(username)
     record = _backend().get_record(norm)
     if not record:
@@ -221,7 +221,12 @@ def get_user_credentials(username: str) -> Optional[Dict]:
             f"Could not decrypt stored PAT for {norm!r}: {exc}. "
             "If you rotated GITHUB_DRIVE_SESSION_SECRET, the user must re-enter their token."
         ) from exc
-    return {"token": token, "owner": github.get("owner", ""), "repo": github.get("repo", "")}
+    return {
+        "token": token,
+        "owner": github.get("owner", ""),
+        "repo": github.get("repo", ""),
+        "repos": list_user_repos(norm),
+    }
 
 
 def clear_user_credentials(username: str) -> None:
@@ -235,13 +240,46 @@ def get_user_status(username: str) -> Dict:
     if not record:
         return {"username": norm, "exists": False}
     github = record.get("github") or {}
+    oauth = _backend().get_oauth_account_for_username(norm)
+    repos = list_user_repos(norm)
     return {
         "username": norm,
         "exists": True,
         "token_present": bool(github.get("token_encrypted")),
         "repo": f"{github.get('owner','')}/{github.get('repo','')}" if github.get("owner") and github.get("repo") else "",
+        "repos": repos,
+        "github_oauth_connected": bool(oauth),
+        "github_login": (oauth or {}).get("github_login", ""),
         "created_at": record.get("created_at", ""),
     }
+
+
+def list_user_repos(username: str) -> List[Dict]:
+    norm = normalize_username(username)
+    record = _backend().get_record(norm)
+    if not record:
+        return []
+    github = record.get("github") or {}
+    repos = list(_backend().list_repositories(norm) or [])
+    active_slug = f"{github.get('owner','')}/{github.get('repo','')}" if github.get("owner") and github.get("repo") else ""
+    normalized = []
+    seen = set()
+    for entry in repos:
+        slug = str(entry.get("slug") or "").strip()
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        normalized.append({
+            "slug": slug,
+            "active": slug == active_slug if active_slug else bool(entry.get("active")),
+            "updated_at": entry.get("updated_at", ""),
+        })
+    if active_slug and active_slug not in seen:
+        normalized.insert(0, {"slug": active_slug, "active": True, "updated_at": github.get("updated_at", "")})
+    if active_slug:
+        for entry in normalized:
+            entry["active"] = entry["slug"] == active_slug
+    return normalized
 
 
 def migrate_json_to_db() -> Dict:
@@ -308,9 +346,11 @@ class _Backend:
     def insert_user(self, record: Dict) -> None: raise NotImplementedError
     def update_password(self, username: str, salt_hex: str, password_hash_hex: str, password_kdf: str) -> None: raise NotImplementedError
     def delete(self, username: str) -> bool: raise NotImplementedError
+    def list_repositories(self, username: str) -> List[Dict]: raise NotImplementedError
     def set_credentials(self, username: str, token_encrypted: str, owner: str, repo: str) -> None: raise NotImplementedError
     def clear_credentials(self, username: str) -> None: raise NotImplementedError
     def get_oauth_account(self, github_id: str) -> Optional[Dict]: raise NotImplementedError
+    def get_oauth_account_for_username(self, username: str) -> Optional[Dict]: raise NotImplementedError
     def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None: raise NotImplementedError
 
 
@@ -357,17 +397,43 @@ class _JSONBackend(_Backend):
             self._save_all(users)
         return True
 
+    def list_repositories(self, username: str) -> List[Dict]:
+        with self._LOCK:
+            users = self._load_all()
+        record = users.get(username)
+        if not record:
+            return []
+        github = record.get("github") or {}
+        return list(github.get("repos") or [])
+
     def set_credentials(self, username, token_encrypted, owner, repo) -> None:
         with self._LOCK:
             users = self._load_all()
             record = users.get(username)
             if not record:
                 raise ValueError(f"Unknown user {username!r}.")
+            existing = record.get("github") or {}
+            repos = list(existing.get("repos") or [])
+            slug = f"{owner}/{repo}" if owner and repo else ""
+            now = now_utc_iso()
+            if slug:
+                repos = [entry for entry in repos if str(entry.get("slug") or "").strip() != slug]
+                repos.insert(0, {"slug": slug, "active": True, "updated_at": now})
+            repos = [
+                {
+                    "slug": str(entry.get("slug") or "").strip(),
+                    "active": str(entry.get("slug") or "").strip() == slug if slug else bool(entry.get("active")),
+                    "updated_at": entry.get("updated_at", now),
+                }
+                for entry in repos
+                if str(entry.get("slug") or "").strip()
+            ]
             record["github"] = {
                 "token_encrypted": token_encrypted,
                 "owner": owner,
                 "repo": repo,
-                "updated_at": now_utc_iso(),
+                "repos": repos,
+                "updated_at": now,
             }
             self._save_all(users)
 
@@ -394,6 +460,23 @@ class _JSONBackend(_Backend):
                     "updated_at": oauth.get("updated_at", ""),
                 }
         return None
+
+    def get_oauth_account_for_username(self, username: str) -> Optional[Dict]:
+        with self._LOCK:
+            users = self._load_all()
+        record = users.get(username)
+        if not record:
+            return None
+        oauth = record.get("oauth") or {}
+        if not oauth.get("github_id"):
+            return None
+        return {
+            "github_id": str(oauth.get("github_id") or ""),
+            "username": username,
+            "github_login": oauth.get("github_login", ""),
+            "email": oauth.get("email", ""),
+            "updated_at": oauth.get("updated_at", ""),
+        }
 
     def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None:
         with self._LOCK:
@@ -453,6 +536,10 @@ class _PostgresBackend(_Backend):
         from . import db
         return db.delete_user(username)
 
+    def list_repositories(self, username: str) -> List[Dict]:
+        from . import db
+        return db.list_user_repositories(username)
+
     def set_credentials(self, username, token_encrypted, owner, repo) -> None:
         from . import db
         # Ensure the user exists so we get a clean error rather than an opaque FK violation.
@@ -467,6 +554,10 @@ class _PostgresBackend(_Backend):
     def get_oauth_account(self, github_id: str) -> Optional[Dict]:
         from . import db
         return db.get_oauth_account(github_id)
+
+    def get_oauth_account_for_username(self, username: str) -> Optional[Dict]:
+        from . import db
+        return db.get_oauth_account_for_username(username)
 
     def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None:
         from . import db
@@ -490,6 +581,7 @@ def _public_view(record: Dict) -> Dict:
         "created_at": record.get("created_at", ""),
         "token_present": bool(github.get("token_encrypted")),
         "repo": f"{github['owner']}/{github['repo']}" if github.get("owner") and github.get("repo") else "",
+        "repos": list(github.get("repos") or []),
     }
 
 
