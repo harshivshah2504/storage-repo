@@ -111,15 +111,18 @@ def create_app() -> Flask:
     @app.get("/api/db-check")
     def api_db_check():
         """Hard-bounded DB connectivity diagnostic. Runs the connection attempt in a
-        worker thread and times out after 20 s no matter what libpq is doing. Always
-        returns within 25 s with either {ok: true, ...} or {ok: false, error: "..."}."""
+        daemon thread; the request returns within 20 s no matter what libpq is doing.
+        A wedged probe thread is left dangling and reaped at process exit — that's the
+        whole point: we must never block the request handler on a stuck C call."""
         from . import db as _db
-        import concurrent.futures
 
         if not _db.is_enabled():
             return jsonify({"ok": False, "error": "GITHUB_DRIVE_DATABASE_URL is not set."}), 503
 
-        def probe():
+        result_holder: Dict[str, Any] = {}
+        done = threading.Event()
+
+        def probe() -> None:
             from . import db as inner_db
             try:
                 with inner_db.connection() as conn:
@@ -131,26 +134,28 @@ def create_app() -> Flask:
                             "WHERE table_schema = 'public' AND table_name IN ('users', 'github_credentials')"
                         )
                         tables_row = cur.fetchone()
-                return {
+                result_holder["result"] = {
                     "ok": True,
                     "server_version": version_row[0] if version_row else "?",
                     "schema_initialized": int(tables_row[0]) >= 2 if tables_row else False,
                 }
             except Exception as exc:
-                return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                result_holder["result"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                done.set()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(probe)
-            try:
-                result = future.result(timeout=20.0)
-            except concurrent.futures.TimeoutError:
-                return jsonify({
-                    "ok": False,
-                    "error": "DB probe did not complete in 20 s. Likely network/firewall block, "
-                             "wrong hostname, or libpq stuck in TLS negotiation. "
-                             "Verify GITHUB_DRIVE_DATABASE_URL hostname is reachable from the host.",
-                }), 504
+        thread = threading.Thread(target=probe, daemon=True, name="db-check")
+        thread.start()
 
+        if not done.wait(timeout=20.0):
+            return jsonify({
+                "ok": False,
+                "error": "DB probe did not complete in 20 s. Worker thread left running. "
+                         "Likely network/firewall block, wrong hostname, or libpq stuck in TLS "
+                         "negotiation. Verify GITHUB_DRIVE_DATABASE_URL hostname is reachable.",
+            }), 504
+
+        result = result_holder.get("result", {"ok": False, "error": "no result captured"})
         return jsonify(result), (200 if result.get("ok") else 502)
 
     @app.get("/login")
