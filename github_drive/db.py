@@ -22,6 +22,38 @@ github_credentials (
   repo            TEXT NOT NULL,
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
+
+github_oauth_accounts (
+  github_id    TEXT PRIMARY KEY,
+  username     TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  github_login TEXT NOT NULL,
+  email        TEXT,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+
+web_tasks (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  type          TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  created_at    DOUBLE PRECISION NOT NULL,
+  updated_at    DOUBLE PRECISION NOT NULL,
+  payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  logs          JSONB NOT NULL DEFAULT '[]'::jsonb,
+  result        JSONB,
+  error         TEXT,
+  progress_total INTEGER NOT NULL DEFAULT 0,
+  progress_done  INTEGER NOT NULL DEFAULT 0,
+  last_event    TEXT
+)
+
+abuse_reports (
+  id          TEXT PRIMARY KEY,
+  reporter    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  subject     TEXT NOT NULL,
+  details     TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
 """
 from __future__ import annotations
 
@@ -169,6 +201,47 @@ def ensure_schema() -> None:
                       owner           TEXT NOT NULL,
                       repo            TEXT NOT NULL,
                       updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS github_oauth_accounts (
+                      github_id    TEXT PRIMARY KEY,
+                      username     TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                      github_login TEXT NOT NULL,
+                      email        TEXT,
+                      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS web_tasks (
+                      id             TEXT PRIMARY KEY,
+                      user_id        TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                      type           TEXT NOT NULL,
+                      status         TEXT NOT NULL,
+                      created_at     DOUBLE PRECISION NOT NULL,
+                      updated_at     DOUBLE PRECISION NOT NULL,
+                      payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                      logs           JSONB NOT NULL DEFAULT '[]'::jsonb,
+                      result         JSONB,
+                      error          TEXT,
+                      progress_total INTEGER NOT NULL DEFAULT 0,
+                      progress_done  INTEGER NOT NULL DEFAULT 0,
+                      last_event     TEXT
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS abuse_reports (
+                      id          TEXT PRIMARY KEY,
+                      reporter    TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                      subject     TEXT NOT NULL,
+                      details     TEXT NOT NULL,
+                      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
                 )
@@ -330,6 +403,183 @@ def clear_credentials(username: str) -> None:
         conn.commit()
 
 
+def get_oauth_account(github_id: str) -> Optional[Dict]:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT github_id, username, github_login, email, updated_at
+                FROM github_oauth_accounts
+                WHERE github_id = %s
+                """,
+                (github_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "github_id": row[0],
+        "username": row[1],
+        "github_login": row[2],
+        "email": row[3] or "",
+        "updated_at": row[4].isoformat() if row[4] else "",
+    }
+
+
+def upsert_oauth_account(github_id: str, username: str, github_login: str, email: str = "") -> None:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO github_oauth_accounts (github_id, username, github_login, email)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (github_id) DO UPDATE
+                SET username = EXCLUDED.username,
+                    github_login = EXCLUDED.github_login,
+                    email = EXCLUDED.email,
+                    updated_at = NOW()
+                """,
+                (github_id, username, github_login, email),
+            )
+        conn.commit()
+
+
+def insert_task_record(task: Dict) -> None:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO web_tasks (
+                  id, user_id, type, status, created_at, updated_at, payload, logs,
+                  result, error, progress_total, progress_done, last_event
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s)
+                """,
+                (
+                    task["id"],
+                    task["user_id"],
+                    task["type"],
+                    task["status"],
+                    float(task["created_at"]),
+                    float(task["updated_at"]),
+                    _json(task.get("payload") or {}),
+                    _json(task.get("logs") or []),
+                    _json(task.get("result")) if task.get("result") is not None else None,
+                    task.get("error"),
+                    int(task.get("progress_total") or 0),
+                    int(task.get("progress_done") or 0),
+                    task.get("last_event"),
+                ),
+            )
+        conn.commit()
+
+
+def update_task_record(task_id: str, updates: Dict) -> None:
+    if not updates:
+        return
+    ensure_schema()
+    allowed = {
+        "status", "updated_at", "payload", "logs", "result", "error",
+        "progress_total", "progress_done", "last_event",
+    }
+    assignments = []
+    values = []
+    for key, value in updates.items():
+        if key not in allowed:
+            continue
+        if key in {"payload", "logs", "result"}:
+            assignments.append(f"{key} = %s::jsonb")
+            values.append(_json(value) if value is not None else None)
+        elif key in {"progress_total", "progress_done"}:
+            assignments.append(f"{key} = %s")
+            values.append(int(value or 0))
+        elif key == "updated_at":
+            assignments.append(f"{key} = %s")
+            values.append(float(value))
+        else:
+            assignments.append(f"{key} = %s")
+            values.append(value)
+    if not assignments:
+        return
+    values.append(task_id)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE web_tasks SET {', '.join(assignments)} WHERE id = %s",
+                tuple(values),
+            )
+        conn.commit()
+
+
+def get_task_record(task_id: str) -> Optional[Dict]:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, status, created_at, updated_at, payload, logs,
+                       result, error, progress_total, progress_done, last_event
+                FROM web_tasks
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            row = cur.fetchone()
+    return _task_row_to_record(row)
+
+
+def list_task_records(user_id: str, limit: int = 50) -> List[Dict]:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, type, status, created_at, updated_at, payload, logs,
+                       result, error, progress_total, progress_done, last_event
+                FROM web_tasks
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (user_id, int(limit)),
+            )
+            rows = cur.fetchall()
+    return [record for record in (_task_row_to_record(row) for row in rows) if record]
+
+
+def fail_stale_running_tasks() -> None:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE web_tasks
+                SET status = 'failed',
+                    error = COALESCE(error, 'Server restarted before this task completed.'),
+                    updated_at = EXTRACT(EPOCH FROM NOW())
+                WHERE status IN ('queued', 'running')
+                """
+            )
+        conn.commit()
+
+
+def insert_abuse_report(report_id: str, reporter: str, subject: str, details: str) -> None:
+    ensure_schema()
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO abuse_reports (id, reporter, subject, details)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (report_id, reporter, subject, details),
+            )
+        conn.commit()
+
+
 def health() -> Dict:
     """Return basic connectivity info for CLI/admin diagnostics."""
     if not is_enabled():
@@ -344,3 +594,29 @@ def health() -> Dict:
     except Exception as exc:
         LOG.warning("DB health check failed: %s", exc)
         return {"enabled": True, "ok": False, "error": str(exc)}
+
+
+def _json(value) -> str:
+    import json
+
+    return json.dumps(value)
+
+
+def _task_row_to_record(row) -> Optional[Dict]:
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "user_id": row[1],
+        "type": row[2],
+        "status": row[3],
+        "created_at": float(row[4] or 0),
+        "updated_at": float(row[5] or 0),
+        "payload": row[6] or {},
+        "logs": row[7] or [],
+        "result": row[8],
+        "error": row[9],
+        "progress_total": int(row[10] or 0),
+        "progress_done": int(row[11] or 0),
+        "last_event": row[12],
+    }

@@ -95,6 +95,41 @@ def create_user(username: str, password: str) -> Dict:
     return _public_view(record)
 
 
+def create_oauth_user(github_id: str, github_login: str, email: str = "") -> Dict:
+    """Create or link a local user for a GitHub OAuth identity."""
+    norm_login = _oauth_username(github_login)
+    existing_oauth = _backend().get_oauth_account(str(github_id))
+    if existing_oauth:
+        record = _backend().get_record(existing_oauth["username"])
+        if record:
+            _backend().upsert_oauth_account(str(github_id), record["username"], github_login, email)
+            return _public_view(record)
+
+    username = _available_username(norm_login)
+    existing_record = _backend().get_record(username)
+    if existing_record is None:
+        password = secrets.token_urlsafe(32)
+        salt = secrets.token_bytes(SALT_BYTES)
+        password_kdf = _preferred_password_kdf()
+        pw_hash = _hash_password(password, salt, password_kdf)
+        record = {
+            "username": username,
+            "salt": salt.hex(),
+            "password_hash": pw_hash.hex(),
+            "password_kdf": password_kdf,
+            "created_at": now_utc_iso(),
+        }
+        _backend().insert_user(record)
+    else:
+        record = existing_record
+    _backend().upsert_oauth_account(str(github_id), record["username"], github_login, email)
+    return _public_view(record)
+
+
+def get_oauth_account(github_id: str) -> Optional[Dict]:
+    return _backend().get_oauth_account(str(github_id))
+
+
 def verify_password(username: str, password: str) -> Optional[Dict]:
     norm = normalize_username(username)
     if not norm or not password:
@@ -136,6 +171,34 @@ def set_user_credentials(username: str, token: str, repo_slug: str) -> Dict:
     if not token:
         raise ValueError("token is required")
     owner, repo = parse_owner_repo(repo_slug)
+    encrypted = _encrypt_at_rest(token, norm)
+    _backend().set_credentials(norm, encrypted, owner, repo)
+    return {"owner": owner, "repo": repo}
+
+
+def set_user_oauth_token(username: str, token: str) -> None:
+    norm = normalize_username(username)
+    if not token:
+        return
+    record = _backend().get_record(norm)
+    if not record:
+        raise ValueError(f"Unknown user {norm!r}.")
+    github = record.get("github") or {}
+    encrypted = _encrypt_at_rest(token, norm)
+    _backend().set_credentials(norm, encrypted, github.get("owner", ""), github.get("repo", ""))
+
+
+def set_user_repo(username: str, repo_slug: str, token: Optional[str] = None) -> Dict:
+    norm = normalize_username(username)
+    owner, repo = parse_owner_repo(repo_slug)
+    record = _backend().get_record(norm)
+    if not record:
+        raise ValueError(f"Unknown user {norm!r}.")
+    if token is None:
+        creds = get_user_credentials(norm)
+        if not creds or not creds.get("token"):
+            raise ValueError("A GitHub token is required before setting a repository.")
+        token = creds["token"]
     encrypted = _encrypt_at_rest(token, norm)
     _backend().set_credentials(norm, encrypted, owner, repo)
     return {"owner": owner, "repo": repo}
@@ -247,6 +310,8 @@ class _Backend:
     def delete(self, username: str) -> bool: raise NotImplementedError
     def set_credentials(self, username: str, token_encrypted: str, owner: str, repo: str) -> None: raise NotImplementedError
     def clear_credentials(self, username: str) -> None: raise NotImplementedError
+    def get_oauth_account(self, github_id: str) -> Optional[Dict]: raise NotImplementedError
+    def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None: raise NotImplementedError
 
 
 class _JSONBackend(_Backend):
@@ -315,6 +380,35 @@ class _JSONBackend(_Backend):
             record.pop("github", None)
             self._save_all(users)
 
+    def get_oauth_account(self, github_id: str) -> Optional[Dict]:
+        with self._LOCK:
+            users = self._load_all()
+        for record in users.values():
+            oauth = record.get("oauth") or {}
+            if str(oauth.get("github_id") or "") == str(github_id):
+                return {
+                    "github_id": str(github_id),
+                    "username": record["username"],
+                    "github_login": oauth.get("github_login", ""),
+                    "email": oauth.get("email", ""),
+                    "updated_at": oauth.get("updated_at", ""),
+                }
+        return None
+
+    def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None:
+        with self._LOCK:
+            users = self._load_all()
+            record = users.get(username)
+            if not record:
+                raise ValueError(f"Unknown user {username!r}.")
+            record["oauth"] = {
+                "github_id": str(github_id),
+                "github_login": github_login,
+                "email": email or "",
+                "updated_at": now_utc_iso(),
+            }
+            self._save_all(users)
+
     @staticmethod
     def _load_all() -> Dict[str, Dict]:
         if not USERS_FILE.exists():
@@ -370,6 +464,14 @@ class _PostgresBackend(_Backend):
         from . import db
         db.clear_credentials(username)
 
+    def get_oauth_account(self, github_id: str) -> Optional[Dict]:
+        from . import db
+        return db.get_oauth_account(github_id)
+
+    def upsert_oauth_account(self, github_id: str, username: str, github_login: str, email: str = "") -> None:
+        from . import db
+        db.upsert_oauth_account(github_id, username, github_login, email)
+
 
 def _backend() -> _Backend:
     from . import db
@@ -389,6 +491,25 @@ def _public_view(record: Dict) -> Dict:
         "token_present": bool(github.get("token_encrypted")),
         "repo": f"{github['owner']}/{github['repo']}" if github.get("owner") and github.get("repo") else "",
     }
+
+
+def _oauth_username(github_login: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9._-]+", "-", normalize_username(github_login)).strip(".-_")
+    if len(cleaned) < 2:
+        cleaned = f"gh-{secrets.token_hex(3)}"
+    return cleaned[:32]
+
+
+def _available_username(base: str) -> str:
+    candidate = base[:32]
+    if _backend().get_record(candidate) is None:
+        return candidate
+    for index in range(2, 1000):
+        suffix = f"-{index}"
+        candidate = f"{base[:32 - len(suffix)]}{suffix}"
+        if _backend().get_record(candidate) is None:
+            return candidate
+    return f"{base[:23]}-{secrets.token_hex(4)}"
 
 
 def _scrypt(password: str, salt: bytes) -> bytes:

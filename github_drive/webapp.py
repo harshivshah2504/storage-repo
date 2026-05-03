@@ -16,6 +16,7 @@ import zipfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlencode
 
 from flask import (
     Flask,
@@ -31,9 +32,10 @@ from flask import (
     url_for,
 )
 
-from . import users
+from . import moderation, task_store, users
 from .api import GitHubClient, parse_owner_repo
 from .auth_manager import ensure_state_dir, restore_from_env, state_status
+from .limits import RateLimitExceeded, check_rate_limit, env_int
 from .storage import (
     delete_archive,
     delete_archive_file,
@@ -47,9 +49,9 @@ from .storage import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
+DEFAULT_USER_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB per browser upload by default.
 LOG = logging.getLogger("github_drive.webapp")
 
-_TASKS: Dict[str, Dict[str, Any]] = {}
 _TASK_LOCK = threading.Lock()
 _DOWNLOAD_DIRS: Dict[str, str] = {}
 _DOWNLOAD_LOCK = threading.Lock()
@@ -60,6 +62,7 @@ def create_app() -> Flask:
 
     ensure_state_dir()
     restore_from_env()
+    task_store.init_store()
 
     secret = os.environ.get("GITHUB_DRIVE_SESSION_SECRET")
     if not secret:
@@ -183,12 +186,24 @@ def create_app() -> Flask:
             "login.html",
             asset_version=_asset_version(),
             allow_signup=users.signup_enabled(),
+            github_oauth_enabled=_github_oauth_enabled(),
             mode="login",
             error=None,
         )
 
     @app.post("/login")
     def login_submit():
+        try:
+            _limit_auth_attempt("login")
+        except RateLimitExceeded as exc:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=users.signup_enabled(),
+                github_oauth_enabled=_github_oauth_enabled(),
+                mode="login",
+                error=str(exc),
+            ), 429
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
         user = users.verify_password(username, password)
@@ -197,6 +212,7 @@ def create_app() -> Flask:
                 "login.html",
                 asset_version=_asset_version(),
                 allow_signup=users.signup_enabled(),
+                github_oauth_enabled=_github_oauth_enabled(),
                 mode="login",
                 error="Invalid username or password.",
             ), 401
@@ -213,6 +229,7 @@ def create_app() -> Flask:
             "login.html",
             asset_version=_asset_version(),
             allow_signup=True,
+            github_oauth_enabled=_github_oauth_enabled(),
             mode="signup",
             error=None,
         )
@@ -221,6 +238,17 @@ def create_app() -> Flask:
     def signup_submit():
         if not users.signup_enabled():
             return _signup_disabled_response()
+        try:
+            _limit_auth_attempt("signup")
+        except RateLimitExceeded as exc:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=True,
+                github_oauth_enabled=_github_oauth_enabled(),
+                mode="signup",
+                error=str(exc),
+            ), 429
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
         confirm = request.form.get("confirm_password") or ""
@@ -229,6 +257,7 @@ def create_app() -> Flask:
                 "login.html",
                 asset_version=_asset_version(),
                 allow_signup=True,
+                github_oauth_enabled=_github_oauth_enabled(),
                 mode="signup",
                 error="Passwords do not match.",
             ), 400
@@ -239,9 +268,65 @@ def create_app() -> Flask:
                 "login.html",
                 asset_version=_asset_version(),
                 allow_signup=True,
+                github_oauth_enabled=_github_oauth_enabled(),
                 mode="signup",
                 error=str(exc),
             ), 400
+        session.clear()
+        session["user_id"] = user["username"]
+        session.permanent = True
+        return redirect(url_for("index"))
+
+    @app.get("/auth/github")
+    def github_oauth_start():
+        if not _github_oauth_enabled():
+            abort(404)
+        try:
+            _limit_auth_attempt("github-oauth")
+        except RateLimitExceeded as exc:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=users.signup_enabled(),
+                github_oauth_enabled=True,
+                mode="login",
+                error=str(exc),
+            ), 429
+        state = secrets.token_urlsafe(32)
+        session["github_oauth_state"] = state
+        params = {
+            "client_id": os.environ["GITHUB_OAUTH_CLIENT_ID"].strip(),
+            "redirect_uri": _github_oauth_redirect_uri(),
+            "scope": (os.environ.get("GITHUB_OAUTH_SCOPE") or "repo read:user user:email").strip(),
+            "state": state,
+            "allow_signup": "true" if users.signup_enabled() else "false",
+        }
+        return redirect(f"https://github.com/login/oauth/authorize?{urlencode(params)}")
+
+    @app.get("/auth/github/callback")
+    def github_oauth_callback():
+        if not _github_oauth_enabled():
+            abort(404)
+        supplied_state = (request.args.get("state") or "").strip()
+        expected_state = session.pop("github_oauth_state", "")
+        if not supplied_state or not expected_state or not secrets.compare_digest(supplied_state, expected_state):
+            return _oauth_error("GitHub sign-in could not be verified. Please try again.")
+        code = (request.args.get("code") or "").strip()
+        if not code:
+            return _oauth_error("GitHub did not return an authorization code.")
+        try:
+            token = _github_oauth_exchange_code(code)
+            profile = _github_oauth_profile(token)
+            if not users.signup_enabled() and not users.get_oauth_account(str(profile["id"])):
+                raise RuntimeError("Signup is disabled on this server. Contact the administrator to create an account.")
+            user = users.create_oauth_user(
+                github_id=str(profile["id"]),
+                github_login=profile["login"],
+                email=profile.get("email") or "",
+            )
+            users.set_user_oauth_token(user["username"], token)
+        except Exception as exc:
+            return _oauth_error(str(exc))
         session.clear()
         session["user_id"] = user["username"]
         session.permanent = True
@@ -283,25 +368,60 @@ def create_app() -> Flask:
         status = users.get_user_status(g.user_id)
         return jsonify(status)
 
+    @app.get("/api/me/export")
+    @login_required
+    def api_export_account():
+        status = users.get_user_status(g.user_id)
+        export = {
+            "account": status,
+            "tasks": _list_tasks(g.user_id),
+            "archives": [],
+        }
+        try:
+            client = _user_client(g.user_id)
+            export["archives"] = list_remote_archives(client=client)
+        except Exception as exc:
+            export["archive_error"] = str(exc)
+        return jsonify(export)
+
+    @app.delete("/api/me")
+    @login_required
+    def api_delete_account():
+        try:
+            _limit_user_action("delete-account", g.user_id)
+        except RateLimitExceeded as exc:
+            return jsonify({"error": str(exc)}), 429
+        username = g.user_id
+        users.delete_user(username)
+        session.clear()
+        return jsonify({"ok": True})
+
     @app.post("/api/me/credentials")
     @login_required
     def api_set_credentials():
+        try:
+            _limit_user_action("credentials", g.user_id)
+        except RateLimitExceeded as exc:
+            return jsonify({"error": str(exc)}), 429
         payload = request.get_json(force=True) or {}
         token = (payload.get("token") or "").strip()
         repo_slug = (payload.get("repo") or "").strip()
-        if not token:
-            return jsonify({"error": "token is required"}), 400
         if not repo_slug or "/" not in repo_slug:
             return jsonify({"error": "repo is required (owner/repo)"}), 400
         try:
             owner, repo = parse_owner_repo(repo_slug)
+            if not token:
+                existing = users.get_user_credentials(g.user_id)
+                token = (existing or {}).get("token", "")
+            if not token:
+                return jsonify({"error": "token is required"}), 400
             client = GitHubClient(token=token, owner=owner, repo=repo)
             login = client.viewer_login()
             if payload.get("create_repo"):
                 client.ensure_repo(private=bool(payload.get("private_repo", True)))
-            users.set_user_credentials(g.user_id, token, repo_slug)
+            users.set_user_repo(g.user_id, repo_slug, token=token)
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         return jsonify({"login": login, "repo": f"{owner}/{repo}"})
 
     @app.delete("/api/me/credentials")
@@ -333,7 +453,7 @@ def create_app() -> Flask:
             client = _user_client(g.user_id)
             result = list_remote_archives(client=client)
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify({"archives": result})
@@ -391,7 +511,7 @@ def create_app() -> Flask:
             client = _user_client(g.user_id)
             result = delete_archive(release_id=release_id, client=client)
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify(result)
@@ -403,7 +523,7 @@ def create_app() -> Flask:
             client = _user_client(g.user_id)
             result = list_archive_contents(release_id=release_id, client=client)
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify(result)
@@ -436,7 +556,7 @@ def create_app() -> Flask:
                     headers={"Cache-Control": "private, max-age=600"},
                 )
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception:
             abort(404)
         return Response(
@@ -508,7 +628,7 @@ def create_app() -> Flask:
             response.call_on_close(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
             return response
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
 
@@ -529,7 +649,7 @@ def create_app() -> Flask:
                 client=client,
             )
         except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return _credential_error_response(exc)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify(result)
@@ -549,18 +669,65 @@ def create_app() -> Flask:
             return jsonify({"error": "Task not found"}), 404
         return jsonify(task_data)
 
+    @app.post("/api/abuse-report")
+    @login_required
+    def abuse_report():
+        try:
+            _limit_user_action("abuse-report", g.user_id)
+        except RateLimitExceeded as exc:
+            return jsonify({"error": str(exc)}), 429
+        payload = request.get_json(force=True) or {}
+        subject = str(payload.get("subject") or "").strip()[:160]
+        details = str(payload.get("details") or "").strip()[:4000]
+        if not subject or not details:
+            return jsonify({"error": "subject and details are required"}), 400
+        report_id = uuid.uuid4().hex[:12]
+        moderation.save_abuse_report({
+            "id": report_id,
+            "reporter": g.user_id,
+            "subject": subject,
+            "details": details,
+        })
+        return jsonify({"ok": True, "report_id": report_id})
+
+    @app.get("/api/admin/users")
+    @login_required
+    def admin_users():
+        if not _is_admin(g.user_id):
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"users": users.list_users()})
+
+    @app.delete("/api/admin/users/<username>")
+    @login_required
+    def admin_delete_user(username: str):
+        if not _is_admin(g.user_id):
+            return jsonify({"error": "Not found"}), 404
+        if users.normalize_username(username) == users.normalize_username(g.user_id):
+            return jsonify({"error": "You cannot delete your own account from this endpoint."}), 400
+        deleted = users.delete_user(username)
+        return jsonify({"deleted": bool(deleted)})
+
     # ── upload (per user) ────────────────────────────────────────────────────
 
     @app.post("/api/upload-files")
     @login_required
     def upload_files():
-        creds = users.get_user_credentials(g.user_id)
+        try:
+            _limit_user_action("upload", g.user_id)
+            _enforce_active_task_limit(g.user_id, "upload")
+            creds = users.get_user_credentials(g.user_id)
+        except RateLimitExceeded as exc:
+            return jsonify({"error": str(exc)}), 429
+        except RuntimeError as exc:
+            return _credential_error_response(exc)
         if not creds:
             return jsonify({"error": "Configure your GitHub token first."}), 400
 
         uploaded_files = request.files.getlist("files")
         if not uploaded_files:
             return jsonify({"error": "No files were uploaded"}), 400
+        if len(uploaded_files) > _max_files_per_upload():
+            return jsonify({"error": f"Too many files in one upload. Limit is {_max_files_per_upload()}."}), 413
 
         relative_paths = request.form.getlist("relative_paths")
         if relative_paths and len(relative_paths) != len(uploaded_files):
@@ -572,6 +739,7 @@ def create_app() -> Flask:
 
         staging_root = Path(tempfile.mkdtemp(prefix="github-drive-web-upload-"))
         saved_paths = []
+        saved_bytes = 0
         for index, uploaded_file in enumerate(uploaded_files):
             raw_relative_path = relative_paths[index] if index < len(relative_paths) else uploaded_file.filename
             try:
@@ -582,6 +750,10 @@ def create_app() -> Flask:
             destination = staging_root / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             uploaded_file.save(destination)
+            saved_bytes += destination.stat().st_size
+            if saved_bytes > _max_user_upload_bytes():
+                shutil.rmtree(staging_root, ignore_errors=True)
+                return jsonify({"error": f"Upload exceeds the per-upload limit of {_max_user_upload_bytes()} bytes."}), 413
             saved_paths.append(destination)
 
         safe_relative_paths = [str(path.relative_to(staging_root)) for path in saved_paths]
@@ -630,7 +802,14 @@ def create_app() -> Flask:
     @app.post("/api/download")
     @login_required
     def download():
-        creds = users.get_user_credentials(g.user_id)
+        try:
+            _limit_user_action("download", g.user_id)
+            _enforce_active_task_limit(g.user_id, "download")
+            creds = users.get_user_credentials(g.user_id)
+        except RateLimitExceeded as exc:
+            return jsonify({"error": str(exc)}), 429
+        except RuntimeError as exc:
+            return _credential_error_response(exc)
         if not creds:
             return jsonify({"error": "Configure your GitHub token first."}), 400
 
@@ -802,21 +981,21 @@ def _run_download_task(task_id: str) -> None:
 
 def _create_task(task_type: str, user_id: str, payload: Dict[str, Any]) -> str:
     task_id = uuid.uuid4().hex[:12]
-    with _TASK_LOCK:
-        _TASKS[task_id] = {
-            "id": task_id,
-            "type": task_type,
-            "user_id": user_id,
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "payload": payload,
-            "logs": [],
-            "result": None,
-            "error": None,
-            "progress_total": 0,
-            "progress_done": 0,
-        }
+    task = {
+        "id": task_id,
+        "type": task_type,
+        "user_id": user_id,
+        "status": "queued",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "payload": payload,
+        "logs": [],
+        "result": None,
+        "error": None,
+        "progress_total": 0,
+        "progress_done": 0,
+    }
+    task_store.create_task(task)
     return task_id
 
 
@@ -826,9 +1005,8 @@ def _start_task_thread(task_id: str, runner) -> None:
 
 
 def _get_task_internal(task_id: str) -> Optional[Dict]:
-    with _TASK_LOCK:
-        task = _TASKS.get(task_id)
-        return _serialize(task) if task else None
+    task = task_store.get_task(task_id)
+    return _serialize(task) if task else None
 
 
 def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
@@ -841,28 +1019,20 @@ def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
 
 
 def _list_tasks(user_id: str) -> List[Dict]:
-    with _TASK_LOCK:
-        tasks = [t for t in _TASKS.values() if t.get("user_id") == user_id]
-    tasks.sort(key=lambda t: t["created_at"], reverse=True)
-    return [_serialize(t) for t in tasks]
+    return [_serialize(t) for t in task_store.list_tasks(user_id)]
 
 
 def _update_task(task_id: str, **updates) -> None:
-    with _TASK_LOCK:
-        task = _TASKS.get(task_id)
-        if task is None:
-            return
-        task.update(updates)
-        task["updated_at"] = time.time()
+    updates["updated_at"] = time.time()
+    task_store.update_task(task_id, updates)
 
 
 def _task_progress(task_id: str, event: str, payload: Dict[str, Any]) -> None:
     message = _format_progress_message(event, payload)
     with _TASK_LOCK:
-        task = _TASKS.get(task_id)
+        task = task_store.get_task(task_id)
         if task is None:
             return
-        task["updated_at"] = time.time()
         task["last_event"] = event
         if event in {"archive_created", "archive_downloading"}:
             task["progress_total"] = int(payload.get("total_items", 0))
@@ -873,13 +1043,20 @@ def _task_progress(task_id: str, event: str, payload: Dict[str, Any]) -> None:
         elif event in {"item_uploaded", "item_downloaded", "item_skipped"}:
             increment = int(payload.get("progress_increment", 1) or 1)
             task["progress_done"] = int(task.get("progress_done", 0)) + increment
-        task["logs"].append({
+        logs = list(task.get("logs") or [])
+        logs.append({
             "timestamp": time.time(),
             "event": event,
             "message": message,
             "payload": payload,
         })
-        task["logs"] = task["logs"][-200:]
+        task_store.update_task(task_id, {
+            "updated_at": time.time(),
+            "last_event": task.get("last_event"),
+            "progress_total": task.get("progress_total", 0),
+            "progress_done": task.get("progress_done", 0),
+            "logs": logs[-200:],
+        })
 
 
 def _format_progress_message(event: str, payload: Dict[str, Any]) -> str:
@@ -930,6 +1107,7 @@ def _signup_disabled_response():
         "login.html",
         asset_version=_asset_version(),
         allow_signup=False,
+        github_oauth_enabled=_github_oauth_enabled(),
         mode="login",
         error="Signup is disabled on this server. Contact the administrator to create an account.",
     ), 403
@@ -951,6 +1129,134 @@ def _csrf_from_request() -> str:
     )
 
 
+def _client_key() -> str:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    return forwarded or request.remote_addr or "unknown"
+
+
+def _limit_auth_attempt(bucket: str) -> None:
+    check_rate_limit(
+        bucket,
+        _client_key(),
+        env_int("GITHUB_DRIVE_AUTH_RATE_LIMIT", 20),
+        env_int("GITHUB_DRIVE_AUTH_RATE_WINDOW_SECONDS", 15 * 60),
+    )
+
+
+def _limit_user_action(bucket: str, user_id: str) -> None:
+    check_rate_limit(
+        bucket,
+        f"{user_id}:{_client_key()}",
+        env_int("GITHUB_DRIVE_USER_ACTION_RATE_LIMIT", 60),
+        env_int("GITHUB_DRIVE_USER_ACTION_RATE_WINDOW_SECONDS", 60),
+    )
+
+
+def _enforce_active_task_limit(user_id: str, task_type: str) -> None:
+    max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 3)
+    if max_active > 0 and task_store.count_active_tasks(user_id) >= max_active:
+        raise RateLimitExceeded(f"You already have {max_active} active transfer(s). Wait for one to finish first.")
+    per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", 2)
+    if per_type > 0 and task_store.count_active_tasks(user_id, task_type=task_type) >= per_type:
+        raise RateLimitExceeded(f"You already have {per_type} active {task_type} task(s).")
+
+
+def _credential_error_response(exc: Exception):
+    message = str(exc)
+    if "Could not decrypt stored PAT" in message:
+        return jsonify({
+            "error": "Your saved GitHub token can no longer be decrypted. Please re-enter it.",
+            "credential_recovery_required": True,
+        }), 409
+    return jsonify({"error": message}), 400
+
+
+def _is_admin(username: str) -> bool:
+    configured = {
+        users.normalize_username(item)
+        for item in re.split(r"[,\s]+", os.environ.get("GITHUB_DRIVE_ADMIN_USERS", ""))
+        if item.strip()
+    }
+    return users.normalize_username(username) in configured
+
+
+def _github_oauth_enabled() -> bool:
+    return bool(
+        (os.environ.get("GITHUB_OAUTH_CLIENT_ID") or "").strip()
+        and (os.environ.get("GITHUB_OAUTH_CLIENT_SECRET") or "").strip()
+    )
+
+
+def _github_oauth_redirect_uri() -> str:
+    configured = (os.environ.get("GITHUB_OAUTH_REDIRECT_URI") or "").strip()
+    if configured:
+        return configured
+    if request.is_secure:
+        return url_for("github_oauth_callback", _external=True, _scheme="https")
+    return url_for("github_oauth_callback", _external=True)
+
+
+def _github_oauth_exchange_code(code: str) -> str:
+    import requests
+
+    response = requests.post(
+        "https://github.com/login/oauth/access_token",
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": os.environ["GITHUB_OAUTH_CLIENT_ID"].strip(),
+            "client_secret": os.environ["GITHUB_OAUTH_CLIENT_SECRET"].strip(),
+            "code": code,
+            "redirect_uri": _github_oauth_redirect_uri(),
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        raise RuntimeError(payload.get("error_description") or payload["error"])
+    token = (payload.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("GitHub did not return an access token.")
+    return token
+
+
+def _github_oauth_profile(token: str) -> Dict[str, Any]:
+    import requests
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "github-drive",
+    }
+    response = requests.get("https://api.github.com/user", headers=headers, timeout=20)
+    response.raise_for_status()
+    profile = response.json()
+    if not profile.get("id") or not profile.get("login"):
+        raise RuntimeError("GitHub profile response was incomplete.")
+    if not profile.get("email"):
+        try:
+            emails = requests.get("https://api.github.com/user/emails", headers=headers, timeout=20)
+            if emails.ok:
+                primary = next((item for item in emails.json() if item.get("primary")), None)
+                if primary:
+                    profile["email"] = primary.get("email") or ""
+        except Exception:
+            pass
+    return profile
+
+
+def _oauth_error(message: str):
+    return render_template(
+        "login.html",
+        asset_version=_asset_version(),
+        allow_signup=users.signup_enabled(),
+        github_oauth_enabled=_github_oauth_enabled(),
+        mode="login",
+        error=message,
+    ), 400
+
+
 # ── hosting helpers ──────────────────────────────────────────────────────────
 
 
@@ -963,6 +1269,14 @@ def _max_upload_bytes() -> int:
     except ValueError:
         return DEFAULT_MAX_UPLOAD_BYTES
     return value if value > 0 else DEFAULT_MAX_UPLOAD_BYTES
+
+
+def _max_user_upload_bytes() -> int:
+    return env_int("GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES", DEFAULT_USER_UPLOAD_BYTES)
+
+
+def _max_files_per_upload() -> int:
+    return env_int("GITHUB_DRIVE_MAX_FILES_PER_UPLOAD", 5000)
 
 
 def _cookie_secure_default() -> bool:
