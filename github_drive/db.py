@@ -74,18 +74,25 @@ def _open_pool():
 
     # Connection-level kwargs.
     #
+    # `autocommit=True` means each statement is its own transaction. SELECT-only paths
+    # don't leave implicit transactions parked on the connection, which is what causes
+    # PgBouncer transaction-pooling endpoints (e.g. Neon's `-pooler` host) to wedge.
+    #
     # `prepare_threshold=None` disables psycopg 3's automatic prepared statements.
-    # This is necessary when the connection goes through a transaction-pooler such as
-    # Neon's `-pooler` endpoint or PgBouncer in transaction mode, where prepared
-    # statements survive across pooled connections and cause "prepared statement already
-    # exists" or first-query hangs. It is harmless on direct Postgres connections.
+    # Required for transaction poolers because prepared statements survive across pooled
+    # connections and cause "prepared statement already exists" or first-query hangs.
     #
     # `connect_timeout` makes a misconfigured URL fail fast (10 s) instead of hanging
     # the request until the gunicorn worker timeout.
+    #
+    # `statement_timeout` is enforced server-side; Postgres itself kills any query that
+    # runs longer than 15 s, so a worker can never hang on a query no matter what the
+    # client-side state looks like.
     connect_kwargs = {
-        "autocommit": False,
+        "autocommit": True,
         "prepare_threshold": None,
         "connect_timeout": 10,
+        "options": "-c statement_timeout=15000",
     }
 
     pool = ConnectionPool(
