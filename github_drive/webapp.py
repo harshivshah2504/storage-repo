@@ -96,18 +96,62 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
+        """Pure liveness probe. Never touches the database — guaranteed to respond fast
+        even when Postgres is unreachable. Use /api/db-check to test the DB explicitly."""
+        from . import db as _db
         status = state_status()
-        from . import db
-        db_health = db.health()
         return jsonify({
             "ok": True,
-            "users": len(users.list_users()),
-            "backend": users.backend_name(),
-            "database": db_health,
+            "database_url_configured": _db.is_enabled(),
             "state_dir": status["state_dir"],
             "state_dir_writable": status["state_dir_writable"],
             "using_render_disk": status["using_render_disk"],
         })
+
+    @app.get("/api/db-check")
+    def api_db_check():
+        """Hard-bounded DB connectivity diagnostic. Runs the connection attempt in a
+        worker thread and times out after 20 s no matter what libpq is doing. Always
+        returns within 25 s with either {ok: true, ...} or {ok: false, error: "..."}."""
+        from . import db as _db
+        import concurrent.futures
+
+        if not _db.is_enabled():
+            return jsonify({"ok": False, "error": "GITHUB_DRIVE_DATABASE_URL is not set."}), 503
+
+        def probe():
+            from . import db as inner_db
+            try:
+                with inner_db.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT version()")
+                        version_row = cur.fetchone()
+                        cur.execute(
+                            "SELECT count(*) FROM information_schema.tables "
+                            "WHERE table_schema = 'public' AND table_name IN ('users', 'github_credentials')"
+                        )
+                        tables_row = cur.fetchone()
+                return {
+                    "ok": True,
+                    "server_version": version_row[0] if version_row else "?",
+                    "schema_initialized": int(tables_row[0]) >= 2 if tables_row else False,
+                }
+            except Exception as exc:
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(probe)
+            try:
+                result = future.result(timeout=20.0)
+            except concurrent.futures.TimeoutError:
+                return jsonify({
+                    "ok": False,
+                    "error": "DB probe did not complete in 20 s. Likely network/firewall block, "
+                             "wrong hostname, or libpq stuck in TLS negotiation. "
+                             "Verify GITHUB_DRIVE_DATABASE_URL hostname is reachable from the host.",
+                }), 504
+
+        return jsonify(result), (200 if result.get("ok") else 502)
 
     @app.get("/login")
     def login_page():
