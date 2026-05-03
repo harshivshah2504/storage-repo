@@ -29,7 +29,21 @@ services:
         sync: false
       - key: GITHUB_DRIVE_BASIC_AUTH
         sync: false
+      - key: GITHUB_DRIVE_ADMIN_USERS
+        sync: false
+      - key: GITHUB_OAUTH_CLIENT_ID
+        sync: false
+      - key: GITHUB_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_OAUTH_REDIRECT_URI
+        sync: false
       - key: GITHUB_DRIVE_ALLOW_SIGNUP
         value: "false"
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
+        sync: false
+      - key: GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES
+        sync: false
+      - key: GITHUB_DRIVE_MAX_FILES_PER_UPLOAD
+        sync: false
+      - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER
         sync: false

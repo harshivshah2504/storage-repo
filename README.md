@@ -184,12 +184,21 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_TOKEN` | optional, CLI/operator use | GitHub PAT with `repo` scope. The multi-user web UI stores each user's PAT separately after login. |
 | `GITHUB_DRIVE_REPO` | optional, CLI/operator use | Target repository as `owner/repo`. |
 | `GITHUB_DRIVE_BASIC_AUTH` | optional outer gate | `user:password`. When set, every route (including `/login`) is wrapped in HTTP Basic. Useful as an outer perimeter on top of per-user logins; not a replacement for them. `/healthz` stays open for platform probes. |
+| `GITHUB_DRIVE_ADMIN_USERS` | optional | Comma- or space-separated usernames that may list and remove accounts through admin APIs. |
 | `GITHUB_DRIVE_ALLOW_SIGNUP` | optional | `true`/`false`; defaults to `true`. Set to `false` on public hosted instances after provisioning users. The bundled Render blueprint sets this to `false`. |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | optional | Enables "Continue with GitHub" login/signup. Create a GitHub OAuth App and set the callback URL to `/auth/github/callback`. |
+| `GITHUB_OAUTH_REDIRECT_URI` | optional | Explicit callback URL, useful behind custom domains. Example: `https://your-domain.example/auth/github/callback`. |
+| `GITHUB_OAUTH_SCOPE` | optional | Defaults to `repo read:user user:email`, so the OAuth token can access the user's chosen archive repo. |
 | `GITHUB_DRIVE_MIRROR_ENV_TOKEN` | optional, legacy | `1` to copy `GITHUB_DRIVE_TOKEN` into `token.json` at web startup. Leave unset for hosted multi-user deployments to avoid storing a plaintext operator PAT on disk. |
 | `GITHUB_DRIVE_ENABLE_DB_CHECK` | optional diagnostic | `1` to enable `/api/db-check` for signed-in users. It is disabled by default so public deployments do not expose database details. |
 | `GITHUB_DRIVE_USER_ID` | optional, legacy | Namespace for the legacy derivation. Only consulted when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPT` | optional | `1` to encrypt every web upload by default. |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | optional | Max single-request upload size. Default 5 GB. |
+| `GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES` | optional | Per browser upload cap after files are staged. Default 2 GB. |
+| `GITHUB_DRIVE_MAX_FILES_PER_UPLOAD` | optional | Max files accepted in one browser upload. Default 5000. |
+| `GITHUB_DRIVE_AUTH_RATE_LIMIT` / `GITHUB_DRIVE_AUTH_RATE_WINDOW_SECONDS` | optional | Login/signup/OAuth attempt limiter. Defaults: 20 attempts per 15 minutes per IP. |
+| `GITHUB_DRIVE_USER_ACTION_RATE_LIMIT` / `GITHUB_DRIVE_USER_ACTION_RATE_WINDOW_SECONDS` | optional | Per-user API action limiter. Defaults: 60 actions per 60 seconds. |
+| `GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER` | optional | Max queued/running transfers per user. Default 3. Use `0` to disable. |
 | `GITHUB_DRIVE_STATE_DIR` | optional, only relevant without a database | Directory for persistent local state (`users.json`, `token.json`). Use a mounted disk if you have one. Ignored once `GITHUB_DRIVE_DATABASE_URL` is set, which is the recommended path on platforms without persistent disks (e.g. Render free tier). |
 | `GITHUB_DRIVE_DATABASE_URL` | strongly recommended on hosted installs | Postgres connection string. Accepts both `postgres://` and `postgresql://` schemes. When set, all account data lives in the database instead of `users.json`. Falls back to `DATABASE_URL` if the prefixed version is unset. |
 | `GITHUB_DRIVE_DB_MIN_CONNECTIONS` / `GITHUB_DRIVE_DB_MAX_CONNECTIONS` | optional | Pool sizing. Defaults: 1 / 10. |
@@ -223,7 +232,7 @@ docker run --rm -p 8765:8765 \
 
 ### Hosting limits
 
-- Single Gunicorn worker, 8 threads. The in-memory task list is shared across threads but not across workers, so do not raise `--workers` above 1 without adding a real task store.
+- Single Gunicorn worker, 8 threads by default. Task metadata is persisted to Postgres when configured, but the actual transfer worker still runs inside the web process, so keep `--workers` at 1 unless you move transfers to a dedicated queue.
 - Per-asset cap: 2 GB (GitHub Releases). Larger files need to be split before upload.
 - API rate limit: 5,000 authenticated requests/hour per token. Auto-bundle mode exists mainly to protect this budget on tiny-file-heavy uploads.
 
