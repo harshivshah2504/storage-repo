@@ -765,6 +765,16 @@ function syncSelectedArchiveFromContents(contents) {
   if (idx >= 0) state.archives[idx] = { ...state.archives[idx], ...updated };
 }
 
+function isSingleFileArchive(contents) {
+  const entries = contents && Array.isArray(contents.entries) ? contents.entries : [];
+  if (entries.length !== 1) return false;
+  const entry = entries[0];
+  if (!entry || !entry.relative_path) return false;
+  const archiveMeta = contents.archive || {};
+  if (archiveMeta.source_type === "file") return true;
+  return normalizeArchivePath(entry.relative_path) === basename(entry.relative_path);
+}
+
 async function loadSelectedArchiveContents() {
   const archive = state.selectedArchive;
   if (!archive) return;
@@ -908,11 +918,22 @@ function openArchiveDetail(archive) {
   } else {
     githubLink.style.display = "none";
   }
-  showArchiveBrowserView();
-  loadSelectedArchiveContents().catch((error) => {
-    $("archiveBrowserStatus").textContent = error.message;
-    $("archiveBrowserGrid").innerHTML = "";
-  });
+  loadSelectedArchiveContents()
+    .then(() => {
+      const contents = state.selectedArchiveContents;
+      if (isSingleFileArchive(contents)) {
+        showArchiveListView();
+        const [entry] = contents.entries || [];
+        if (entry) openPreview(entry);
+        return;
+      }
+      showArchiveBrowserView();
+    })
+    .catch((error) => {
+      showArchiveBrowserView();
+      $("archiveBrowserStatus").textContent = error.message;
+      $("archiveBrowserGrid").innerHTML = "";
+    });
 }
 
 async function startDownload() {
