@@ -1349,6 +1349,31 @@ input, select {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.auth-oauth-button {
+  width: 100%;
+  justify-content: center;
+  text-decoration: none;
+  margin-bottom: 16px;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-text-subtle);
+  font-size: 12px;
+  margin: 0 0 16px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  height: 1px;
+  background: var(--color-border);
+  flex: 1;
 }
 
 .auth-card .auth-footer {

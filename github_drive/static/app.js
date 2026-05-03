@@ -80,7 +80,12 @@ async function fetchJson(url, options = {}) {
   }
   let payload;
   try { payload = await response.json(); } catch (_) { payload = {}; }
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `Request failed (${response.status})`);
+    error.payload = payload;
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -162,6 +167,16 @@ function applyMe(me) {
   }
 }
 
+function handleCredentialError(error) {
+  if (!error?.payload?.credential_recovery_required) return false;
+  state.me.token_present = false;
+  $("popoverRepoLine").textContent = "GitHub token needs to be re-entered";
+  $("sidebarRepoLine").textContent = "Reconnect required";
+  openModal("credsModal");
+  alert(error.message);
+  return true;
+}
+
 async function loadMe() {
   const me = await fetchJson("/api/me");
   applyMe(me);
@@ -188,6 +203,7 @@ async function submitCreds(event) {
     await loadArchives();
     showFlash(`Connected to ${result.repo}`);
   } catch (error) {
+    if (handleCredentialError(error)) return;
     alert(error.message);
   }
 }
@@ -200,6 +216,52 @@ async function clearCreds() {
     await loadMe();
     state.archives = [];
     renderArchives();
+  } catch (error) {
+    if (handleCredentialError(error)) return;
+    alert(error.message);
+  }
+}
+
+async function exportAccountData() {
+  try {
+    const payload = await fetchJson("/api/me/export");
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `github-drive-${state.me.username || "account"}-export.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    if (handleCredentialError(error)) return;
+    alert(error.message);
+  }
+}
+
+async function deleteAccount() {
+  if (!confirm("Delete your GitHub Drive account from this server? Your GitHub releases are not deleted.")) return;
+  if (!confirm("This removes your login, saved token, and server task history. Continue?")) return;
+  try {
+    await fetchJson("/api/me", { method: "DELETE" });
+    window.location.href = "/login";
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function reportAbuse() {
+  const subject = prompt("Short summary");
+  if (!subject) return;
+  const details = prompt("Details");
+  if (!details) return;
+  try {
+    await fetchJson("/api/abuse-report", {
+      method: "POST",
+      body: JSON.stringify({ subject, details }),
+    });
+    alert("Report submitted.");
   } catch (error) {
     alert(error.message);
   }
@@ -889,6 +951,7 @@ async function loadArchives() {
   } catch (error) {
     state.archives = [];
     renderArchives();
+    handleCredentialError(error);
     console.error("loadArchives", error);
   }
 }
@@ -949,6 +1012,7 @@ async function startDownload() {
     state.activeDownloadTaskId = result.task_id;
     await loadTasks();
   } catch (error) {
+    if (handleCredentialError(error)) return;
     alert(error.message);
   }
 }
@@ -965,6 +1029,7 @@ async function deleteSelectedArchive() {
     showArchiveListView();
     await loadArchives();
   } catch (error) {
+    if (handleCredentialError(error)) return;
     alert(error.message);
   }
 }
@@ -1135,7 +1200,10 @@ async function uploadFileGroup(group, uploadForm) {
   let payload = {};
   try { payload = await response.json(); } catch (_) {}
   if (!response.ok) {
-    throw new Error(payload.error || `${group.name} upload failed (${response.status})`);
+    const error = new Error(payload.error || `${group.name} upload failed (${response.status})`);
+    error.payload = payload;
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -1176,6 +1244,11 @@ async function uploadSelectedFiles(files) {
   await loadTasks();
   const failures = results.filter((result) => result.status === "rejected");
   if (failures.length) {
+    const recoveryFailure = failures.find((failure) => failure.reason?.payload?.credential_recovery_required);
+    if (recoveryFailure) {
+      handleCredentialError(recoveryFailure.reason);
+      return;
+    }
     throw new Error(failures.map((failure) => failure.reason.message).join("\n"));
   }
 }
@@ -1519,6 +1592,9 @@ async function init() {
   setupPreviewBackdrop();
   $("credsForm").addEventListener("submit", submitCreds);
   $("clearCredsButton").addEventListener("click", clearCreds);
+  $("exportAccountButton").addEventListener("click", exportAccountData);
+  $("reportAbuseButton").addEventListener("click", reportAbuse);
+  $("deleteAccountButton").addEventListener("click", deleteAccount);
   $("startDownloadButton").addEventListener("click", startDownload);
   $("downloadCurrentFolderButton").addEventListener("click", () => {
     const path = normalizeArchivePath(state.selectedArchivePath);
