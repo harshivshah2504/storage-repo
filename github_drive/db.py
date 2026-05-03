@@ -329,7 +329,7 @@ def clear_credentials(username: str) -> None:
 
 
 def health() -> Dict:
-    """Return basic connectivity info for /healthz."""
+    """Return basic connectivity info for CLI/admin diagnostics."""
     if not is_enabled():
         return {"enabled": False}
     try:

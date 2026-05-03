@@ -80,6 +80,30 @@ def create_app() -> Flask:
     app.permanent_session_lifetime = 60 * 60 * 24 * 14  # 14 days
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
+    @app.context_processor
+    def inject_security_context():
+        return {"csrf_token": _csrf_token}
+
+    @app.before_request
+    def enforce_csrf():
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return None
+        expected = _csrf_token()
+        supplied = _csrf_from_request()
+        if not supplied or not secrets.compare_digest(supplied, expected):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Invalid or missing CSRF token."}), 403
+            abort(403)
+        return None
+
+    @app.after_request
+    def add_security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        return response
+
     status = state_status()
     if os.environ.get("RENDER") and not status["using_render_disk"]:
         LOG.warning(
@@ -96,17 +120,8 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
-        """Pure liveness probe. Never touches the database — guaranteed to respond fast
-        even when Postgres is unreachable. Use /api/db-check to test the DB explicitly."""
-        from . import db as _db
-        status = state_status()
-        return jsonify({
-            "ok": True,
-            "database_url_configured": _db.is_enabled(),
-            "state_dir": status["state_dir"],
-            "state_dir_writable": status["state_dir_writable"],
-            "using_render_disk": status["using_render_disk"],
-        })
+        """Pure liveness probe. Never exposes state paths, database details, or repo data."""
+        return jsonify({"ok": True})
 
     @app.get("/api/db-check")
     def api_db_check():
@@ -116,6 +131,10 @@ def create_app() -> Flask:
         whole point: we must never block the request handler on a stuck C call."""
         from . import db as _db
 
+        if (os.environ.get("GITHUB_DRIVE_ENABLE_DB_CHECK") or "").strip().lower() not in {"1", "true", "yes"}:
+            abort(404)
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required"}), 401
         if not _db.is_enabled():
             return jsonify({"ok": False, "error": "GITHUB_DRIVE_DATABASE_URL is not set."}), 503
 
@@ -546,28 +565,43 @@ def create_app() -> Flask:
         relative_paths = request.form.getlist("relative_paths")
         if relative_paths and len(relative_paths) != len(uploaded_files):
             return jsonify({"error": "relative_paths count does not match uploaded files"}), 400
+        requested_source_name = _browser_upload_source_name(request.form.get("source_name_override") or "")
+        requested_source_type = (request.form.get("source_type_override") or "").strip().lower()
+        if requested_source_type not in {"file", "directory"}:
+            requested_source_type = None
 
         staging_root = Path(tempfile.mkdtemp(prefix="github-drive-web-upload-"))
         saved_paths = []
         for index, uploaded_file in enumerate(uploaded_files):
-            relative_path = relative_paths[index] if index < len(relative_paths) else uploaded_file.filename
-            relative_path = (relative_path or uploaded_file.filename or f"upload-{index}").strip().lstrip("/\\")
+            raw_relative_path = relative_paths[index] if index < len(relative_paths) else uploaded_file.filename
+            try:
+                relative_path = _safe_upload_relative_path(raw_relative_path, uploaded_file.filename or f"upload-{index}")
+            except ValueError as exc:
+                shutil.rmtree(staging_root, ignore_errors=True)
+                return jsonify({"error": str(exc)}), 400
             destination = staging_root / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             uploaded_file.save(destination)
             saved_paths.append(destination)
 
-        folder_root = _browser_upload_root_folder(relative_paths)
+        safe_relative_paths = [str(path.relative_to(staging_root)) for path in saved_paths]
+        folder_root = _browser_upload_root_folder(safe_relative_paths)
         source_name_override = None
         source_type_override = None
-        if len(saved_paths) == 1 and not any(path and ("/" in path or "\\" in path) for path in relative_paths):
+        if len(saved_paths) == 1 and not any(path and ("/" in path or "\\" in path) for path in safe_relative_paths):
             source_path = str(saved_paths[0])
+            if requested_source_name:
+                source_name_override = requested_source_name
+                source_type_override = requested_source_type or "file"
         elif folder_root:
             source_path = str(staging_root / folder_root)
             source_name_override = folder_root
             source_type_override = "directory"
         else:
             source_path = str(staging_root)
+            if requested_source_name:
+                source_name_override = requested_source_name
+                source_type_override = requested_source_type or "directory"
 
         encrypt = request.form.get("encrypt", "false").lower() == "true"
         payload = {
@@ -901,6 +935,22 @@ def _signup_disabled_response():
     ), 403
 
 
+def _csrf_token() -> str:
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+def _csrf_from_request() -> str:
+    return (
+        request.headers.get("X-CSRF-Token")
+        or request.form.get("csrf_token")
+        or ""
+    )
+
+
 # ── hosting helpers ──────────────────────────────────────────────────────────
 
 
@@ -977,6 +1027,30 @@ def _browser_upload_root_folder(relative_paths: List[str]) -> Optional[str]:
     if not saw_nested_path or not roots:
         return None
     return next(iter(roots))
+
+
+def _browser_upload_source_name(value: str) -> Optional[str]:
+    cleaned = re.sub(r"[\\/]+", " ", str(value or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:160] or None
+
+
+def _safe_upload_relative_path(raw_path: str, fallback_name: str) -> str:
+    candidate = str(raw_path or fallback_name or "upload").replace("\\", "/")
+    candidate = candidate.replace("\x00", "").strip().lstrip("/")
+    parts = []
+    for part in re.split(r"/+", candidate):
+        part = part.strip()
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise ValueError("Upload paths may not contain '..' segments.")
+        if re.search(r"[\x00-\x1f\x7f]", part):
+            raise ValueError("Upload paths may not contain control characters.")
+        parts.append(part)
+    if not parts:
+        parts = [_safe_download_name(fallback_name or "upload")]
+    return "/".join(parts)
 
 
 def _normalize_virtual_path(path: str) -> str:

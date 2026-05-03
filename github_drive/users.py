@@ -54,8 +54,9 @@ SALT_BYTES = 16
 
 
 def signup_enabled() -> bool:
-    """Self-service signup is always available."""
-    return True
+    """Return whether visitors may create their own web accounts."""
+    raw = (os.environ.get("GITHUB_DRIVE_ALLOW_SIGNUP") or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def normalize_username(username: str) -> str:

@@ -165,8 +165,9 @@ def _repo_source() -> str:
 
 
 def restore_from_env() -> None:
-    """Render-style: if GITHUB_DRIVE_TOKEN is set, mirror it (and repo) into the on-disk file
-    so cached storage code that reads the file picks it up. Safe to call repeatedly."""
+    """Legacy opt-in: mirror env token/repo into the on-disk CLI token file."""
+    if (os.environ.get("GITHUB_DRIVE_MIRROR_ENV_TOKEN") or "").strip().lower() not in {"1", "true", "yes"}:
+        return
     token = (os.environ.get("GITHUB_DRIVE_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
     if not token:
         return
