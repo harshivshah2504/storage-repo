@@ -26,6 +26,8 @@ setup(
         "Flask",
         "requests>=2.31.0",
         "PyCryptodome==3.17.0",
+        "Pillow>=10.0.0",
+        "psycopg[binary,pool]>=3.1",
     ],
     classifiers=[
         "Topic :: Internet :: WWW/HTTP",

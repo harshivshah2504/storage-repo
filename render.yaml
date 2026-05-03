@@ -1,3 +1,8 @@
+databases:
+  - name: github-drive-db
+    plan: free
+    postgresMajorVersion: "16"
+
 services:
   - type: web
     name: github-drive
@@ -12,6 +17,10 @@ services:
     envVars:
       - key: GITHUB_DRIVE_SESSION_SECRET
         generateValue: true
+      - key: GITHUB_DRIVE_DATABASE_URL
+        fromDatabase:
+          name: github-drive-db
+          property: connectionString
       - key: GITHUB_DRIVE_STATE_DIR
         value: /var/data/github-drive
       - key: GITHUB_DRIVE_TOKEN

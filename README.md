@@ -117,12 +117,38 @@ Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant
 
 | Concern | Behaviour |
 |---|---|
-| Account store | `GITHUB_DRIVE_STATE_DIR/users.json` when set, otherwise `~/.github-drive/users.json`. One JSON record per user, scrypt-hashed password, atomically written. |
+| Account store | **Postgres** when `GITHUB_DRIVE_DATABASE_URL` (or `DATABASE_URL`) is set — strongly recommended for any hosted deployment. Schema is created on first connect. JSON file (`GITHUB_DRIVE_STATE_DIR/users.json`, otherwise `~/.github-drive/users.json`) is the local-dev fallback. Records are identical between backends; switch with `github-drive users migrate-to-db`. |
 | Session | Flask signed cookie, HttpOnly + SameSite=Lax. Lifetime: 14 days. Signed with `GITHUB_DRIVE_SESSION_SECRET`. |
 | GitHub PAT | Encrypted at rest with AES-128-GCM, key derived from `GITHUB_DRIVE_SESSION_SECRET` + username. Rotating the session secret invalidates stored PATs and forces every user to re-enter theirs. |
 | Encryption key for archive contents | Derived from `GITHUB_DRIVE_ENCRYPTION_KEY` (or session secret fallback) HMAC-mixed with the username, so two users on the same server cannot decrypt each other's archives. |
 | Tasks | Each task records its `user_id`; `/api/tasks` only returns the caller's. Background runners use the per-user PAT. |
 | Signup | **Always open.** Anyone reaching the URL can create an account at `/signup`. Combine with `GITHUB_DRIVE_BASIC_AUTH` if you want an outer gate (invite-only style). |
+
+### External database (Postgres)
+
+For any hosted deployment, run on Postgres rather than the JSON file. The JSON path is fine for local development but is fragile on ephemeral filesystems and under concurrent writes. Postgres gives you durable storage, atomic writes, and survives instance restarts.
+
+| Provider | How to wire up |
+|---|---|
+| **Render** | The bundled `render.yaml` provisions a managed Postgres database (`github-drive-db`, free tier) and injects the connection string as `GITHUB_DRIVE_DATABASE_URL`. Just deploy the blueprint. |
+| **Supabase** | Project settings → Database → Connection string → URI. Use the **direct** (non-pooled) one. Set it as `GITHUB_DRIVE_DATABASE_URL`. |
+| **Neon / Railway / Fly Postgres / RDS / etc.** | Any Postgres ≥ 13. Copy the connection string to `GITHUB_DRIVE_DATABASE_URL`. SSL is honored if the URL contains `?sslmode=require`. |
+
+Schema is created automatically on the first connection. Two tables are used:
+
+```
+users(username PK, salt, password_hash, password_kdf, created_at, updated_at)
+github_credentials(username PK→users, token_encrypted, owner, repo, updated_at)
+```
+
+Operational helpers:
+
+```sh
+python -m github_drive users backend          # show active backend + DB connectivity
+python -m github_drive users migrate-to-db    # copy users.json into Postgres (one-time)
+```
+
+`migrate-to-db` is idempotent and never overwrites users that already exist in the database.
 
 ### Provisioning users (CLI, on the host)
 
@@ -161,7 +187,9 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_USER_ID` | optional, legacy | Namespace for the legacy derivation. Only consulted when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPT` | optional | `1` to encrypt every web upload by default. |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | optional | Max single-request upload size. Default 5 GB. |
-| `GITHUB_DRIVE_STATE_DIR` | recommended on hosted installs | Directory for persistent local state such as `users.json` and `token.json`. On Render, point this at the mounted disk path. |
+| `GITHUB_DRIVE_STATE_DIR` | recommended on hosted installs | Directory for persistent local state such as `users.json` and `token.json`. On Render, point this at the mounted disk path. Ignored once `GITHUB_DRIVE_DATABASE_URL` is set. |
+| `GITHUB_DRIVE_DATABASE_URL` | strongly recommended on hosted installs | Postgres connection string. Accepts both `postgres://` and `postgresql://` schemes. When set, all account data lives in the database instead of `users.json`. Falls back to `DATABASE_URL` if the prefixed version is unset. |
+| `GITHUB_DRIVE_DB_MIN_CONNECTIONS` / `GITHUB_DRIVE_DB_MAX_CONNECTIONS` | optional | Pool sizing. Defaults: 1 / 10. |
 | `PORT` | injected by host | Standard PaaS variable; the app reads it automatically. |
 
 ### Hosted vs local: ephemeral filesystem
@@ -169,6 +197,8 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 On Render, Fly.io, etc. the filesystem is wiped on every restart unless you mount persistent storage. That affects both the operator token file and the multi-user account store, so hosted signups can disappear after a restart if `users.json` lives on the ephemeral root filesystem.
 
 For Render, mount a persistent disk and point `GITHUB_DRIVE_STATE_DIR` at it. The included [render.yaml](render.yaml) does this by mounting `/var/data` and storing app state in `/var/data/github-drive`. Without that, a newly created hosted user may be able to sign up once and then fail to log back in after the service restarts because their record is gone.
+
+You can verify the live service is using persistent state by opening `/healthz`. A healthy Render disk-backed deployment should report `"using_render_disk": true`, `"state_dir_writable": true`, and a `state_dir` under `/var/data/github-drive`. If it reports `false`, the app is still using ephemeral storage and the Render service needs a persistent disk attached or `GITHUB_DRIVE_STATE_DIR` corrected.
 
 ### Deploy targets
 
