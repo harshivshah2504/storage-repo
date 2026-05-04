@@ -1346,20 +1346,32 @@ async function uploadSelectedFiles(files) {
 }
 
 async function createEmptyFolder() {
-  if (!isMutableArchiveContext()) return;
-  const currentPath = normalizeArchivePath(state.selectedArchivePath);
   const rawName = prompt("Folder name");
   const folderName = normalizeUploadRelativePath(rawName || "");
   if (!folderName) return;
-  const fullPath = currentPath ? `${currentPath}/${folderName}` : folderName;
   try {
-    await fetchJson(`/api/archives/${state.selectedArchive.release_id}/folders`, {
+    if (isMutableArchiveContext()) {
+      const currentPath = normalizeArchivePath(state.selectedArchivePath);
+      const fullPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+      await fetchJson(`/api/archives/${state.selectedArchive.release_id}/folders`, {
+        method: "POST",
+        body: JSON.stringify({ path: fullPath }),
+      });
+      await loadSelectedArchiveContents();
+      state.selectedArchivePath = fullPath;
+      renderArchiveContents();
+      return;
+    }
+
+    const created = await fetchJson("/api/archives/folders", {
       method: "POST",
-      body: JSON.stringify({ path: fullPath }),
+      body: JSON.stringify({ name: folderName }),
     });
+    await loadArchives();
+    state.selectedArchive = created;
+    state.selectedArchivePath = folderName;
     await loadSelectedArchiveContents();
-    state.selectedArchivePath = fullPath;
-    renderArchiveContents();
+    showArchiveBrowserView();
   } catch (error) {
     if (handleCredentialError(error)) return;
     alert(error.message);
@@ -1369,7 +1381,7 @@ async function createEmptyFolder() {
 function syncNewMenuState() {
   const button = $("newEmptyFolderButton");
   if (!button) return;
-  button.style.display = isMutableArchiveContext() ? "" : "none";
+  button.style.display = state.selectedArchive && !isMutableArchiveContext() ? "none" : "";
 }
 
 // ── Sidebar + topbar interactions ─────────────────────────────────────────────
