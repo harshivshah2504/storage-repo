@@ -413,12 +413,14 @@ function updatePageChrome() {
 
 function syncArchiveBrowserToolbar() {
   const archive = state.selectedArchive;
+  const contents = state.selectedArchiveContents;
   const currentPath = normalizeArchivePath(state.selectedArchivePath);
   const tag = $("archiveDetailTagText");
   const button = $("downloadCurrentFolderButton");
   if (tag) {
     tag.textContent = archive?.tag ? `Tag: ${archive.tag}` : "";
   }
+  syncNewMenuState();
   if (!button) return;
   if (!archive?.release_id || !currentPath) {
     button.style.display = "none";
@@ -426,6 +428,19 @@ function syncArchiveBrowserToolbar() {
   }
   button.style.display = "";
   button.textContent = `Download ${basename(currentPath) || "folder"}`;
+}
+
+function isMutableArchiveContext() {
+  const archive = state.selectedArchive;
+  const contents = state.selectedArchiveContents;
+  const archiveMeta = contents?.archive || archive?.archive || {};
+  return Boolean(
+    archive?.release_id
+    && archive?.tag
+    && contents
+    && contents.supports_file_delete
+    && archiveMeta.source_type !== "file"
+  );
 }
 
 function matchesTypeFilter(archive, value) {
@@ -668,6 +683,15 @@ function listArchiveChildren(entries, currentPath) {
     if (prefix && !relativePath.startsWith(prefix)) continue;
     const remainder = prefix ? relativePath.slice(prefix.length) : relativePath;
     if (!remainder) continue;
+    if (entry.kind === "folder") {
+      const folderParts = remainder.split("/").filter(Boolean);
+      if (!folderParts.length) continue;
+      const folderName = folderParts[0];
+      const folderPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+      const folder = folders.get(folderPath) || { name: folderName, path: folderPath, fileCount: 0, imageCount: 0 };
+      folders.set(folderPath, folder);
+      continue;
+    }
     const parts = remainder.split("/").filter(Boolean);
     if (parts.length > 1) {
       const folderName = parts[0];
@@ -874,6 +898,7 @@ function isSingleFileArchive(contents) {
   if (entries.length !== 1) return false;
   const entry = entries[0];
   if (!entry || !entry.relative_path) return false;
+  if (entry.kind === "folder") return false;
   const archiveMeta = contents.archive || {};
   if (archiveMeta.source_type === "file") return true;
   return normalizeArchivePath(entry.relative_path) === basename(entry.relative_path);
@@ -1222,6 +1247,10 @@ function makeUploadFormData(uploadForm, group) {
   formData.set("encrypt", uploadForm.querySelector('input[name="encrypt"]').checked ? "true" : "false");
   formData.append("retries", "3");
   formData.append("recursive", "true");
+  if (group.appendTag) formData.append("append_tag", group.appendTag);
+  if (group.appendRelativePath) formData.append("append_relative_path", group.appendRelativePath);
+  if (group.sourceNameOverride) formData.append("source_name_override", group.sourceNameOverride);
+  if (group.sourceTypeOverride) formData.append("source_type_override", group.sourceTypeOverride);
 
   for (const entry of group.entries) {
     formData.append("files", entry.file, entry.file.name);
@@ -1279,20 +1308,68 @@ async function uploadSelectedFiles(files) {
   }
 
   const uploadForm = $("uploadForm");
-  const groups = groupFilesForUpload(files);
+  const groups = groupFilesForUpload(files).map((group) => {
+    if (!isMutableArchiveContext()) return group;
+    const archive = state.selectedArchive;
+    const currentPath = normalizeArchivePath(state.selectedArchivePath);
+    const archiveName = archiveTitle(archive);
+    return {
+      ...group,
+      appendTag: archive.tag,
+      appendRelativePath: currentPath,
+      sourceNameOverride: archiveName,
+      sourceTypeOverride: "directory",
+    };
+  });
 
   showTransferToast();
-  const results = await uploadFileGroups(groups, uploadForm);
-  await loadTasks();
-  const failures = results.filter((result) => result.status === "rejected");
-  if (failures.length) {
-    const recoveryFailure = failures.find((failure) => failure.reason?.payload?.credential_recovery_required);
-    if (recoveryFailure) {
-      handleCredentialError(recoveryFailure.reason);
-      return;
+  const mutableContext = isMutableArchiveContext();
+  try {
+    const results = await uploadFileGroups(groups, uploadForm);
+    await loadTasks();
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.length) {
+      const recoveryFailure = failures.find((failure) => failure.reason?.payload?.credential_recovery_required);
+      if (recoveryFailure) {
+        handleCredentialError(recoveryFailure.reason);
+        return;
+      }
+      throw new Error(failures.map((failure) => failure.reason.message).join("\n"));
     }
-    throw new Error(failures.map((failure) => failure.reason.message).join("\n"));
+    if (mutableContext && state.selectedArchive) {
+      await loadSelectedArchiveContents();
+      await loadArchives();
+    }
+  } catch (error) {
+    throw error;
   }
+}
+
+async function createEmptyFolder() {
+  if (!isMutableArchiveContext()) return;
+  const currentPath = normalizeArchivePath(state.selectedArchivePath);
+  const rawName = prompt("Folder name");
+  const folderName = normalizeUploadRelativePath(rawName || "");
+  if (!folderName) return;
+  const fullPath = currentPath ? `${currentPath}/${folderName}` : folderName;
+  try {
+    await fetchJson(`/api/archives/${state.selectedArchive.release_id}/folders`, {
+      method: "POST",
+      body: JSON.stringify({ path: fullPath }),
+    });
+    await loadSelectedArchiveContents();
+    state.selectedArchivePath = fullPath;
+    renderArchiveContents();
+  } catch (error) {
+    if (handleCredentialError(error)) return;
+    alert(error.message);
+  }
+}
+
+function syncNewMenuState() {
+  const button = $("newEmptyFolderButton");
+  if (!button) return;
+  button.style.display = isMutableArchiveContext() ? "" : "none";
 }
 
 // ── Sidebar + topbar interactions ─────────────────────────────────────────────
@@ -1302,6 +1379,7 @@ function setupNewMenu() {
   const menu = $("newMenu");
   button.addEventListener("click", (event) => {
     event.stopPropagation();
+    syncNewMenuState();
     menu.classList.toggle("open");
   });
   document.addEventListener("click", (event) => {
@@ -1316,6 +1394,10 @@ function setupNewMenu() {
   $("newFolderUploadButton").addEventListener("click", () => {
     menu.classList.remove("open");
     $("folderPicker").click();
+  });
+  $("newEmptyFolderButton").addEventListener("click", async () => {
+    menu.classList.remove("open");
+    await createEmptyFolder();
   });
   $("openCredsFromMenu2").addEventListener("click", () => {
     menu.classList.remove("open");
