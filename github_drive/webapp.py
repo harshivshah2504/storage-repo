@@ -61,6 +61,7 @@ _DOWNLOAD_LOCK = threading.Lock()
 
 
 def create_app() -> Flask:
+    from . import db as db_module
     from werkzeug.middleware.proxy_fix import ProxyFix
 
     ensure_state_dir()
@@ -109,6 +110,22 @@ def create_app() -> Flask:
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         return response
+
+    @app.errorhandler(db_module.DatabaseUnavailableError)
+    def handle_database_unavailable(exc):
+        message = str(exc) or "Database is temporarily unavailable. Please try again."
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message}), 503
+        if request.path in {"/login", "/signup"}:
+            return render_template(
+                "login.html",
+                asset_version=_asset_version(),
+                allow_signup=users.signup_enabled(),
+                github_oauth_enabled=_github_oauth_enabled(),
+                mode="signup" if request.path == "/signup" else "login",
+                error=message,
+            ), 503
+        return Response(message, status=503, mimetype="text/plain")
 
     status = state_status()
     if os.environ.get("RENDER") and not status["using_render_disk"]:

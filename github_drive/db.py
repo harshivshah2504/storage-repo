@@ -82,6 +82,10 @@ _POOL = None
 _INITIALIZED = False
 
 
+class DatabaseUnavailableError(RuntimeError):
+    """Raised when the configured Postgres backend cannot hand out a connection."""
+
+
 def database_url() -> Optional[str]:
     raw = (
         os.environ.get("GITHUB_DRIVE_DATABASE_URL")
@@ -139,10 +143,14 @@ def _open_pool():
         "options": "-c statement_timeout=15000",
     }
 
+    max_connections = max(1, int(os.environ.get("GITHUB_DRIVE_DB_MAX_CONNECTIONS", "4")))
+    min_connections = max(0, int(os.environ.get("GITHUB_DRIVE_DB_MIN_CONNECTIONS", "0")))
+    min_connections = min(min_connections, max_connections)
+
     pool = ConnectionPool(
         _normalize_url(url),
-        min_size=int(os.environ.get("GITHUB_DRIVE_DB_MIN_CONNECTIONS", "1")),
-        max_size=int(os.environ.get("GITHUB_DRIVE_DB_MAX_CONNECTIONS", "10")),
+        min_size=min_connections,
+        max_size=max_connections,
         kwargs=connect_kwargs,
         timeout=15,                    # max wait when handing out a pooled connection
         open=False,
@@ -178,8 +186,17 @@ def close_pool() -> None:
 @contextmanager
 def connection():
     pool = get_pool()
-    with pool.connection() as conn:
-        yield conn
+    try:
+        with pool.connection() as conn:
+            yield conn
+    except Exception as exc:
+        if type(exc).__name__ == "PoolTimeout":
+            LOG.warning("Database connection pool exhausted: %s", exc)
+            raise DatabaseUnavailableError(
+                "Database is temporarily busy. Reduce GITHUB_DRIVE_DB_MAX_CONNECTIONS, "
+                "increase your Postgres connection limit, or wait a few seconds and retry."
+            ) from exc
+        raise
 
 
 def ensure_schema() -> None:
