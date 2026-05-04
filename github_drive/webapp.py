@@ -38,6 +38,7 @@ from .auth_manager import ensure_state_dir, restore_from_env, state_status
 from .limits import RateLimitExceeded, check_rate_limit, env_int
 from .storage import (
     append_to_archive,
+    create_empty_archive,
     create_archive_folder,
     delete_archive,
     delete_archive_file,
@@ -551,6 +552,27 @@ def create_app() -> Flask:
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
         return jsonify(result)
+
+    @app.post("/api/archives/folders")
+    @login_required
+    def archive_root_folder_create():
+        payload = request.get_json(force=True) or {}
+        folder_name = _browser_upload_source_name(payload.get("name") or "")
+        if not folder_name:
+            return jsonify({"error": "name is required"}), 400
+        try:
+            client = _user_client(g.user_id)
+            result = create_empty_archive(
+                source_name=folder_name,
+                initial_folder_path=folder_name,
+                private_release=bool(payload.get("private_release", False)),
+                client=client,
+            )
+        except RuntimeError as exc:
+            return _credential_error_response(exc)
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(_serialize(result))
 
     @app.get("/api/archives/<int:release_id>/file")
     @login_required

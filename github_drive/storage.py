@@ -338,6 +338,88 @@ def create_archive_folder(
     }
 
 
+def create_empty_archive(
+    source_name: str,
+    private_release: bool = False,
+    initial_folder_path: str = "",
+    retries: int = 3,
+    progress: ProgressCallback = None,
+    client: Optional[GitHubClient] = None,
+) -> ArchiveManifest:
+    client = client or get_client()
+    normalized_name = (source_name or "").strip() or "Untitled folder"
+    normalized_root = _normalize_folder_path(initial_folder_path or normalized_name)
+    virtual_folders = _normalize_virtual_folders([normalized_root], [])
+    created_at = now_utc_iso()
+    archive_meta = {
+        "storage_format": STORAGE_FORMAT,
+        "metadata_version": METADATA_VERSION,
+        "created_at": created_at,
+        "source_name": normalized_name,
+        "source_type": "directory",
+        "source_path": normalized_name,
+        "total_items": 0,
+        "encrypted": False,
+        "storage_mode": STORAGE_MODE_FILE_ASSETS,
+        "kinds": {"image": 0, "video": 0, "audio": 0, "document": 0, "archive": 0, "code": 0, "other": 0},
+        "cover_asset_name": None,
+        "virtual_folders": virtual_folders,
+    }
+    release, archive_meta = _prepare_upload_release(
+        client=client,
+        archive_meta=archive_meta,
+        source_name=normalized_name,
+        retries=retries,
+        private_release=private_release,
+        resume_release_id=None,
+        resume_tag=None,
+        resume_archive_id=None,
+    )
+    manifest_payload = _manifest_payload_from_items(archive_meta, [], False, STORAGE_MODE_FILE_ASSETS)
+    client.upload_asset_bytes(
+        release_id=release["id"],
+        asset_name=MANIFEST_ASSET_NAME,
+        payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
+        content_type="application/json",
+    )
+    emit_progress(
+        progress,
+        "archive_created",
+        {
+            "archive_id": archive_meta["archive_id"],
+            "release_id": release["id"],
+            "tag": release.get("tag_name") or archive_tag_for(archive_meta["archive_id"]),
+            "title": release.get("name") or _make_archive_title(normalized_name, 0),
+            "total_items": 0,
+            "html_url": release.get("html_url", ""),
+        },
+    )
+    emit_progress(
+        progress,
+        "archive_uploaded",
+        {
+            "archive_id": archive_meta["archive_id"],
+            "release_id": release["id"],
+            "tag": release.get("tag_name") or archive_tag_for(archive_meta["archive_id"]),
+            "total_items": 0,
+            "html_url": release.get("html_url", ""),
+        },
+    )
+    return ArchiveManifest(
+        archive_id=archive_meta["archive_id"],
+        release_id=release["id"],
+        tag=release.get("tag_name") or archive_tag_for(archive_meta["archive_id"]),
+        name=release.get("name") or _make_archive_title(normalized_name, 0),
+        html_url=release.get("html_url") or "",
+        source_path=normalized_name,
+        created_at=created_at,
+        total_items=0,
+        encrypted=False,
+        items=[],
+        storage_mode=STORAGE_MODE_FILE_ASSETS,
+    )
+
+
 def append_to_archive(
     source_path: str,
     base_relative_path: str = "",
