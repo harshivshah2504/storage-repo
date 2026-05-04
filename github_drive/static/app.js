@@ -12,6 +12,10 @@ const state = {
   toastDismissed: false,
   filters: { type: "all", modified: "any", sort: "newest" },
   viewMode: (typeof localStorage !== "undefined" && localStorage.getItem("gd_view_mode")) || "grid",
+  taskPollTimer: null,
+  taskPollInFlight: false,
+  taskPollHasActive: false,
+  taskPollErrorCount: 0,
 };
 
 const TEXT_PREVIEW_EXTENSIONS = new Set([
@@ -63,6 +67,12 @@ const DOC_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx
 const ARCHIVE_EXTENSIONS = new Set([".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z", ".rar"]);
 const CODE_EXTENSIONS = new Set([".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
   ".go", ".rs", ".rb", ".php", ".sh", ".html", ".css", ".json", ".yaml", ".yml", ".toml"]);
+const ACTIVE_TASK_STATUSES = new Set(["queued", "running"]);
+const TASK_POLL_ACTIVE_MS = 2500;
+const TASK_POLL_IDLE_MS = 15000;
+const TASK_POLL_HIDDEN_MS = 30000;
+const TASK_POLL_ERROR_BASE_MS = 10000;
+const TASK_POLL_ERROR_MAX_MS = 60000;
 
 // ── Network helper ────────────────────────────────────────────────────────────
 
@@ -120,9 +130,72 @@ function formatBytes(bytes) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[i]}`;
 }
 
+function updateStorageUsage() {
+  const totalBytes = state.archives.reduce((sum, archive) => sum + Number(archive.total_asset_bytes || 0), 0);
+  const limitBytes = Number(window.__GD_STORAGE_LIMIT_BYTES__ || 0);
+  const label = $("storageUsageLabel");
+  const percentLabel = $("storageUsagePercent");
+  const fill = $("storageBarFill");
+  if (label) {
+    label.textContent = limitBytes > 0
+      ? `${formatBytes(totalBytes)} of ${formatBytes(limitBytes)} used`
+      : `${formatBytes(totalBytes)} used`;
+  }
+  if (percentLabel) {
+    percentLabel.textContent = limitBytes > 0
+      ? `${Math.min(999, Math.round((totalBytes / limitBytes) * 100))}%`
+      : "";
+  }
+  if (fill) {
+    const pct = limitBytes > 0
+      ? Math.max(0, Math.min(100, (totalBytes / limitBytes) * 100))
+      : (totalBytes > 0 ? 100 : 0);
+    fill.style.width = `${pct}%`;
+    fill.style.opacity = limitBytes > 0 ? "1" : (totalBytes > 0 ? "0.45" : "0.2");
+  }
+}
+
 function show(id, visible) {
   const node = $(id);
   if (node) node.style.display = visible ? "" : "none";
+}
+
+function clearTaskPollTimer() {
+  if (state.taskPollTimer !== null) {
+    clearTimeout(state.taskPollTimer);
+    state.taskPollTimer = null;
+  }
+}
+
+function hasConfiguredRepo() {
+  return Boolean(state.me.token_present && state.me.repo);
+}
+
+function hasActiveTasks(tasks) {
+  return (tasks || []).some((task) => ACTIVE_TASK_STATUSES.has(task.status));
+}
+
+function nextTaskPollDelay() {
+  if (state.taskPollErrorCount > 0) {
+    return Math.min(
+      TASK_POLL_ERROR_BASE_MS * (2 ** (state.taskPollErrorCount - 1)),
+      TASK_POLL_ERROR_MAX_MS,
+    );
+  }
+  if (document.visibilityState === "hidden") {
+    return state.taskPollHasActive ? TASK_POLL_IDLE_MS : TASK_POLL_HIDDEN_MS;
+  }
+  return state.taskPollHasActive ? TASK_POLL_ACTIVE_MS : TASK_POLL_IDLE_MS;
+}
+
+function scheduleTaskPoll(delayOverride = null) {
+  clearTaskPollTimer();
+  if (!hasConfiguredRepo()) return;
+  const delay = Math.max(0, delayOverride == null ? nextTaskPollDelay() : delayOverride);
+  state.taskPollTimer = window.setTimeout(async () => {
+    state.taskPollTimer = null;
+    await loadTasks();
+  }, delay);
 }
 
 // ── Modal helpers ─────────────────────────────────────────────────────────────
@@ -154,6 +227,7 @@ function setupModalDismiss() {
 // ── User / credentials ────────────────────────────────────────────────────────
 
 function applyMe(me) {
+  const wasConfigured = hasConfiguredRepo();
   state.me = me;
   const repo = me.repo || "";
   const configured = Boolean(me.token_present && repo);
@@ -164,8 +238,16 @@ function applyMe(me) {
 
   if (!configured) {
     // Force the user to set credentials before they can do anything else.
+    clearTaskPollTimer();
+    state.taskPollHasActive = false;
+    state.taskPollErrorCount = 0;
+    renderTasks([]);
     openModal("credsModal");
+  } else if (!wasConfigured || (!state.taskPollTimer && !state.taskPollInFlight)) {
+    state.taskPollErrorCount = 0;
+    scheduleTaskPoll(0);
   }
+  updateStorageUsage();
 }
 
 function syncCredsModal() {
@@ -1009,15 +1091,18 @@ async function loadArchives() {
     state.archives = [];
     showArchiveListView();
     renderArchives();
+    updateStorageUsage();
     return;
   }
   try {
     const payload = await fetchJson("/api/archives");
     state.archives = payload.archives || [];
     renderArchives();
+    updateStorageUsage();
   } catch (error) {
     state.archives = [];
     renderArchives();
+    updateStorageUsage();
     handleCredentialError(error);
     console.error("loadArchives", error);
   }
@@ -1174,18 +1259,30 @@ function renderTasks(tasks) {
 }
 
 async function loadTasks() {
-  if (!state.me.token_present || !state.me.repo) return;
+  if (!hasConfiguredRepo()) {
+    clearTaskPollTimer();
+    return;
+  }
+  if (state.taskPollInFlight) return;
+  state.taskPollInFlight = true;
   try {
     const payload = await fetchJson("/api/tasks");
-    renderTasks(payload.tasks || []);
-    // If a freshly-completed upload comes in, refresh the archives list.
     const tasks = payload.tasks || [];
+    renderTasks(tasks);
+    state.taskPollHasActive = hasActiveTasks(tasks);
+    state.taskPollErrorCount = 0;
+    // If a freshly-completed upload comes in, refresh the archives list.
     const completedUpload = tasks.find((t) => t.type === "upload" && t.status === "completed" && !t._archivesRefreshed);
     if (completedUpload) {
       completedUpload._archivesRefreshed = true;
       loadArchives();
     }
-  } catch (_) { /* ignore polling errors */ }
+  } catch (_) {
+    state.taskPollErrorCount += 1;
+  } finally {
+    state.taskPollInFlight = false;
+    scheduleTaskPoll();
+  }
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
@@ -1755,7 +1852,10 @@ async function init() {
     console.error("init error", error);
   }
 
-  setInterval(loadTasks, 2500);
+  document.addEventListener("visibilitychange", () => {
+    if (!hasConfiguredRepo()) return;
+    scheduleTaskPoll(document.visibilityState === "visible" ? 0 : nextTaskPollDelay());
+  });
 }
 
 window.addEventListener("DOMContentLoaded", init);
