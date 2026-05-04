@@ -145,7 +145,7 @@ def list_archive_contents(
         tag=tag,
         archive_id=archive_id,
     )
-    entries = _flatten_archive_entries(items, storage_mode)
+    entries = _flatten_archive_entries(items, storage_mode, archive_meta)
     return {
         "release_id": release["id"],
         "tag": release.get("tag_name", ""),
@@ -222,22 +222,13 @@ def delete_archive_file(
         if asset_id:
             client.delete_asset(int(asset_id))
 
-    manifest_payload = {
-        "storage_format": STORAGE_FORMAT,
-        "metadata_version": METADATA_VERSION,
-        "archive_id": archive_meta.get("archive_id"),
-        "source_name": archive_meta.get("source_name"),
-        "source_path": archive_meta.get("source_path"),
-        "created_at": archive_meta.get("created_at"),
-        "total_items": len(remaining_items),
-        "encrypted": bool(encrypted),
-        "storage_mode": storage_mode,
-        "items": [_manifest_item_from_download_item(item) for item in remaining_items],
-    }
-
     remaining_paths = [item.get("relative_path") or "" for item in remaining_items]
     archive_meta["total_items"] = len(remaining_items)
     archive_meta["kinds"] = _classify_relative_paths(remaining_paths)
+    archive_meta["virtual_folders"] = _normalize_virtual_folders(
+        archive_meta.get("virtual_folders"),
+        remaining_paths,
+    )
     archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(
         _is_image_path(path) for path in remaining_paths
     ) else None
@@ -254,7 +245,7 @@ def delete_archive_file(
     client.upload_asset_bytes(
         release_id=release["id"],
         asset_name=MANIFEST_ASSET_NAME,
-        payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
+        payload=json.dumps(_manifest_payload_from_items(archive_meta, remaining_items, encrypted, storage_mode), indent=2).encode("utf-8"),
         content_type="application/json",
     )
 
@@ -295,6 +286,221 @@ def delete_archive_file(
         "remaining_items": len(remaining_items),
         "archive": archive_meta,
     }
+
+
+def create_archive_folder(
+    folder_path: str,
+    release_id: Optional[int] = None,
+    tag: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    client: Optional[GitHubClient] = None,
+) -> Dict:
+    client = client or get_client()
+    release, archive_meta, _assets, _by_name, _manifest, items, _encrypted, storage_mode = _load_archive_snapshot(
+        client=client,
+        release_id=release_id,
+        tag=tag,
+        archive_id=archive_id,
+    )
+    if storage_mode != STORAGE_MODE_FILE_ASSETS:
+        raise RuntimeError("Empty folders are unavailable for bundled archives.")
+    if (archive_meta.get("source_type") or "").strip().lower() == "file":
+        raise RuntimeError("Single-file archives cannot contain folders.")
+    normalized_path = _normalize_folder_path(folder_path)
+    if not normalized_path:
+        raise RuntimeError("Folder path is required.")
+    existing_paths = [item.get("relative_path") or "" for item in items]
+    if normalized_path in existing_paths:
+        raise RuntimeError("A file already exists with that path.")
+    for file_path in existing_paths:
+        if not file_path:
+            continue
+        if normalized_path.startswith(f"{file_path}/"):
+            raise RuntimeError(f"Cannot create folder inside file path {file_path!r}.")
+
+    current_folders = _normalize_virtual_folders(
+        archive_meta.get("virtual_folders"),
+        existing_paths,
+    )
+    if normalized_path not in current_folders:
+        current_folders.extend(_folder_ancestors(normalized_path))
+        archive_meta["virtual_folders"] = _normalize_virtual_folders(current_folders, existing_paths)
+        client.update_release(
+            release["id"],
+            body=encode_archive_body(archive_meta),
+        )
+
+    return {
+        "release_id": release["id"],
+        "tag": release.get("tag_name", ""),
+        "folder_path": normalized_path,
+        "archive": archive_meta,
+    }
+
+
+def append_to_archive(
+    source_path: str,
+    base_relative_path: str = "",
+    release_id: Optional[int] = None,
+    tag: Optional[str] = None,
+    archive_id: Optional[str] = None,
+    workers: int = 4,
+    recursive: bool = True,
+    retries: int = 3,
+    encrypt: bool = False,
+    encode_key: Optional[bytes] = None,
+    progress: ProgressCallback = None,
+    client: Optional[GitHubClient] = None,
+) -> ArchiveManifest:
+    client = client or get_client()
+    release, archive_meta, _assets, by_name, _manifest, existing_items, existing_encrypted, storage_mode = _load_archive_snapshot(
+        client=client,
+        release_id=release_id,
+        tag=tag,
+        archive_id=archive_id,
+    )
+    if storage_mode != STORAGE_MODE_FILE_ASSETS:
+        raise RuntimeError("Adding files into existing folders is unavailable for bundled archives.")
+    if (archive_meta.get("source_type") or "").strip().lower() == "file":
+        raise RuntimeError("Single-file archives cannot accept nested folder uploads.")
+    if bool(existing_encrypted) != bool(encrypt):
+        raise RuntimeError("Upload encryption setting does not match this archive.")
+    if encrypt and not encode_key:
+        raise RuntimeError("encrypt=True requires encode_key.")
+    if encrypt:
+        crypto._validate_key(encode_key)
+
+    base_prefix = _normalize_folder_path(base_relative_path)
+    entries = collect_file_entries(source_path, recursive=recursive)
+    if base_prefix:
+        entries = [
+            {**entry, "relative_path": f"{base_prefix}/{entry['relative_path']}"}
+            for entry in entries
+        ]
+
+    existing_by_path = {item.get("relative_path") or "": item for item in existing_items}
+    replacing_paths = {entry["relative_path"] for entry in entries}
+    kept_items = [item for item in existing_items if (item.get("relative_path") or "") not in replacing_paths]
+
+    from . import thumbnails
+    existing_assets = {asset["name"]: asset for asset in client.list_release_assets(release["id"])}
+    order_seed = max((int(item.get("order") or 0) for item in kept_items), default=-1) + 1
+    new_items: List[ArchiveItem] = []
+    pending: List[Dict] = []
+
+    for offset, entry in enumerate(entries):
+        order = order_seed + offset
+        plan = _plan_entry_assets(order, entry, encrypt)
+        old_item = existing_by_path.get(entry["relative_path"])
+        if old_item:
+            for part in old_item.get("parts") or []:
+                asset_id = part.get("asset_id")
+                if asset_id:
+                    try:
+                        client.delete_asset(int(asset_id))
+                    except Exception:
+                        pass
+        pending.append({"index": order, "entry": entry, "plan": plan})
+
+    max_workers = max(1, min(int(workers), len(pending) or 1))
+    if pending:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _upload_entry,
+                    client=client,
+                    release_id=release["id"],
+                    order=task["index"],
+                    plan=task["plan"],
+                    entry=task["entry"],
+                    encrypt=encrypt,
+                    encode_key=encode_key,
+                    retries=retries,
+                    progress=progress,
+                    existing_assets=existing_assets,
+                ): task
+                for task in pending
+            }
+            for future in as_completed(futures):
+                new_items.append(future.result())
+
+    all_items = kept_items + [asdict(item) if isinstance(item, ArchiveItem) else item for item in new_items]
+    all_items.sort(key=lambda item: int(item.get("order") or 0))
+    relative_paths = [item.get("relative_path") or "" for item in all_items]
+    virtual_folders = _normalize_virtual_folders(
+        list(archive_meta.get("virtual_folders") or []) + (_folder_ancestors(base_prefix) if base_prefix else []),
+        relative_paths,
+    )
+
+    archive_meta["total_items"] = len(all_items)
+    archive_meta["kinds"] = thumbnails.classify_entries([
+        {"relative_path": relative_path}
+        for relative_path in relative_paths
+    ])
+    archive_meta["virtual_folders"] = virtual_folders
+    archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(_is_image_path(path) for path in relative_paths) else None
+
+    client.update_release(
+        release["id"],
+        name=_make_archive_title(archive_meta.get("source_name") or release.get("name") or "archive", len(all_items)),
+        body=encode_archive_body(archive_meta),
+    )
+
+    existing_manifest = existing_assets.get(MANIFEST_ASSET_NAME)
+    if existing_manifest:
+        try:
+            client.delete_asset(existing_manifest["id"])
+        except Exception:
+            pass
+    client.upload_asset_bytes(
+        release_id=release["id"],
+        asset_name=MANIFEST_ASSET_NAME,
+        payload=json.dumps(_manifest_payload_from_items(archive_meta, all_items, encrypt, storage_mode), indent=2).encode("utf-8"),
+        content_type="application/json",
+    )
+
+    current_cover = existing_assets.get(COVER_ASSET_NAME)
+    if current_cover:
+        try:
+            client.delete_asset(current_cover["id"])
+        except Exception:
+            pass
+    next_image = next((item for item in all_items if _is_image_path(item.get("relative_path") or "")), None)
+    if next_image:
+        try:
+            image_bytes, _content_type = _read_archive_entry_bytes(
+                client=client,
+                item=next_image,
+                relative_path=next_image["relative_path"],
+                member=None,
+                encrypted=encrypt,
+                encode_key=encode_key,
+            )
+            cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
+            if cover_bytes:
+                client.upload_asset_bytes(
+                    release_id=release["id"],
+                    asset_name=COVER_ASSET_NAME,
+                    payload=cover_bytes,
+                    content_type="image/jpeg",
+                )
+        except Exception:
+            pass
+
+    manifest_items = [ArchiveItem(**item) for item in all_items]
+    return ArchiveManifest(
+        archive_id=archive_meta.get("archive_id") or "",
+        release_id=release["id"],
+        tag=release.get("tag_name") or "",
+        name=release.get("name") or release.get("tag_name") or "",
+        html_url=release.get("html_url") or "",
+        source_path=source_path,
+        created_at=archive_meta.get("created_at") or now_utc_iso(),
+        total_items=len(all_items),
+        encrypted=encrypt,
+        items=manifest_items,
+        storage_mode=storage_mode,
+    )
 
 
 def upload_archive(
@@ -1392,7 +1598,7 @@ def _load_archive_snapshot(
     return release, archive_meta, assets, by_name, manifest, items, encrypted, storage_mode
 
 
-def _flatten_archive_entries(items: List[Dict], storage_mode: str) -> List[Dict]:
+def _flatten_archive_entries(items: List[Dict], storage_mode: str, archive_meta: Optional[Dict] = None) -> List[Dict]:
     from . import thumbnails
 
     entries: List[Dict] = []
@@ -1423,6 +1629,16 @@ def _flatten_archive_entries(items: List[Dict], storage_mode: str) -> List[Dict]
                     "previewable": ext in thumbnails.IMAGE_EXTENSIONS,
                 }
             )
+    for folder_path in _normalize_virtual_folders((archive_meta or {}).get("virtual_folders"), [entry["relative_path"] for entry in entries]):
+        entries.append(
+            {
+                "relative_path": folder_path,
+                "original_size": 0,
+                "content_type": "",
+                "kind": "folder",
+                "previewable": False,
+            }
+        )
     entries.sort(key=lambda entry: entry["relative_path"].lower())
     return entries
 
@@ -1496,6 +1712,21 @@ def _manifest_item_from_download_item(item: Dict) -> Dict:
     }
 
 
+def _manifest_payload_from_items(archive_meta: Dict, items: List[Dict], encrypted: bool, storage_mode: str) -> Dict:
+    return {
+        "storage_format": STORAGE_FORMAT,
+        "metadata_version": METADATA_VERSION,
+        "archive_id": archive_meta.get("archive_id"),
+        "source_name": archive_meta.get("source_name"),
+        "source_path": archive_meta.get("source_path"),
+        "created_at": archive_meta.get("created_at"),
+        "total_items": len(items),
+        "encrypted": bool(encrypted),
+        "storage_mode": storage_mode,
+        "items": [_manifest_item_from_download_item(item) for item in items],
+    }
+
+
 def _classify_relative_paths(relative_paths: List[str]) -> Dict[str, int]:
     from . import thumbnails
 
@@ -1509,6 +1740,42 @@ def _is_image_path(relative_path: str) -> bool:
     from . import thumbnails
 
     return Path(relative_path).suffix.lower() in thumbnails.IMAGE_EXTENSIONS
+
+
+def _normalize_folder_path(path: str) -> str:
+    cleaned = str(path or "").replace("\\", "/").strip().strip("/")
+    parts = []
+    for part in cleaned.split("/"):
+        part = part.strip()
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise RuntimeError("Folder paths may not contain '..' segments.")
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _folder_ancestors(path: str) -> List[str]:
+    normalized = _normalize_folder_path(path)
+    if not normalized:
+        return []
+    parts = normalized.split("/")
+    return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+
+
+def _normalize_virtual_folders(folders: Optional[Iterable[str]], file_paths: Optional[List[str]] = None) -> List[str]:
+    existing = set()
+    for raw in folders or []:
+        normalized = _normalize_folder_path(raw)
+        if normalized:
+            existing.update(_folder_ancestors(normalized))
+    for relative_path in file_paths or []:
+        normalized_file = _normalize_folder_path(relative_path)
+        if not normalized_file or "/" not in normalized_file:
+            continue
+        parent = normalized_file.rsplit("/", 1)[0]
+        existing.update(_folder_ancestors(parent))
+    return sorted(existing)
 
 
 def _sanitize_for_asset_name(value: str) -> str:

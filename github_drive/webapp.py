@@ -37,6 +37,8 @@ from .api import GitHubClient, parse_owner_repo
 from .auth_manager import ensure_state_dir, restore_from_env, state_status
 from .limits import RateLimitExceeded, check_rate_limit, env_int
 from .storage import (
+    append_to_archive,
+    create_archive_folder,
     delete_archive,
     delete_archive_file,
     download_archive,
@@ -530,6 +532,26 @@ def create_app() -> Flask:
             return jsonify({"error": str(exc)}), 500
         return jsonify(result)
 
+    @app.post("/api/archives/<int:release_id>/folders")
+    @login_required
+    def archive_folder_create(release_id: int):
+        payload = request.get_json(force=True) or {}
+        relative_path = _normalize_virtual_path(payload.get("path") or "")
+        if not relative_path:
+            return jsonify({"error": "path is required"}), 400
+        try:
+            client = _user_client(g.user_id)
+            result = create_archive_folder(
+                release_id=release_id,
+                folder_path=relative_path,
+                client=client,
+            )
+        except RuntimeError as exc:
+            return _credential_error_response(exc)
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(result)
+
     @app.get("/api/archives/<int:release_id>/file")
     @login_required
     def archive_file(release_id: int):
@@ -600,13 +622,19 @@ def create_app() -> Flask:
                 entry for entry in (contents.get("entries") or [])
                 if (entry.get("relative_path") or "").startswith(prefix)
             ]
-            if not matched_entries:
+            folder_exists = any(
+                (entry.get("kind") == "folder" and (entry.get("relative_path") or "") == relative_path)
+                for entry in (contents.get("entries") or [])
+            )
+            if not matched_entries and not folder_exists:
                 return jsonify({"error": f"Folder {relative_path!r} was not found in this archive."}), 404
 
             folder_name = Path(relative_path).name or "folder"
             temp_dir = Path(tempfile.mkdtemp(prefix="github-drive-entry-zip-"))
             zip_path = temp_dir / f"{_safe_download_name(folder_name)}.zip"
             with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+                if folder_exists and not matched_entries:
+                    archive.writestr(f"{folder_name}/", b"")
                 for entry in matched_entries:
                     entry_path = entry.get("relative_path") or ""
                     payload, _content_type = read_archive_file(
@@ -787,6 +815,8 @@ def create_app() -> Flask:
             "encrypt": encrypt,
             "upload_mode": (request.form.get("upload_mode") or "auto").strip().lower() or "auto",
             "resume_tag": (request.form.get("resume_tag") or "").strip() or None,
+            "append_tag": (request.form.get("append_tag") or "").strip() or None,
+            "append_relative_path": _normalize_virtual_path(request.form.get("append_relative_path") or "") or None,
             "cleanup_staging_root": str(staging_root),
             "upload_origin": "browser-transfer",
             "uploaded_file_count": len(saved_paths),
@@ -930,11 +960,22 @@ def _run_upload_task(task_id: str) -> None:
             return
     _update_task(task_id, status="running")
     try:
-        result = upload_archive(
-            client=client,
-            progress=lambda event, data: _task_progress(task_id, event, data),
-            **payload,
-        )
+        append_tag = payload.pop("append_tag", None)
+        append_relative_path = payload.pop("append_relative_path", None)
+        if append_tag:
+            result = append_to_archive(
+                client=client,
+                progress=lambda event, data: _task_progress(task_id, event, data),
+                tag=append_tag,
+                base_relative_path=append_relative_path or "",
+                **payload,
+            )
+        else:
+            result = upload_archive(
+                client=client,
+                progress=lambda event, data: _task_progress(task_id, event, data),
+                **payload,
+            )
         _update_task(task_id, status="completed", result=_serialize(result))
     except Exception as exc:
         _update_task(task_id, status="failed", error=str(exc))
