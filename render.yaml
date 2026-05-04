@@ -39,6 +39,10 @@ services:
         sync: false
       - key: GITHUB_DRIVE_ALLOW_SIGNUP
         value: "false"
+      - key: GITHUB_DRIVE_DB_MIN_CONNECTIONS
+        value: "0"
+      - key: GITHUB_DRIVE_DB_MAX_CONNECTIONS
+        value: "4"
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
         sync: false
       - key: GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES
