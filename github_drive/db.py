@@ -200,7 +200,8 @@ def connection():
         if type(exc).__name__ == "PoolTimeout":
             LOG.warning("Database connection pool exhausted: %s", exc)
             raise DatabaseUnavailableError(
-                "Database is temporarily busy. Reduce GITHUB_DRIVE_DB_MAX_CONNECTIONS, "
+                "Database is temporarily busy. Too many requests hit the Postgres pool at once. "
+                "Reduce polling or open tabs, increase GITHUB_DRIVE_DB_MAX_CONNECTIONS, "
                 "increase your Postgres connection limit, or wait a few seconds and retry."
             ) from exc
         raise
