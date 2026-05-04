@@ -106,6 +106,10 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+def _uses_neon_pooler(url: str) -> bool:
+    return "-pooler." in (url or "")
+
+
 def _open_pool():
     """Create and open a fresh connection pool. Caller holds _LOCK."""
     try:
@@ -133,22 +137,25 @@ def _open_pool():
     # `connect_timeout` makes a misconfigured URL fail fast (10 s) instead of hanging
     # the request until the gunicorn worker timeout.
     #
-    # `statement_timeout` is enforced server-side; Postgres itself kills any query that
-    # runs longer than 15 s, so a worker can never hang on a query no matter what the
-    # client-side state looks like.
+    # Avoid passing `statement_timeout` in startup options to Neon's pooled endpoints:
+    # the pooler rejects it as an unsupported startup parameter.
+    normalized_url = _normalize_url(url)
     connect_kwargs = {
         "autocommit": True,
         "prepare_threshold": None,
         "connect_timeout": 10,
-        "options": "-c statement_timeout=15000",
     }
+    if not _uses_neon_pooler(normalized_url):
+        # On direct Postgres connections, keep a server-side statement timeout so stuck
+        # queries cannot pin a worker forever.
+        connect_kwargs["options"] = "-c statement_timeout=15000"
 
     max_connections = max(1, int(os.environ.get("GITHUB_DRIVE_DB_MAX_CONNECTIONS", "4")))
     min_connections = max(0, int(os.environ.get("GITHUB_DRIVE_DB_MIN_CONNECTIONS", "0")))
     min_connections = min(min_connections, max_connections)
 
     pool = ConnectionPool(
-        _normalize_url(url),
+        normalized_url,
         min_size=min_connections,
         max_size=max_connections,
         kwargs=connect_kwargs,
