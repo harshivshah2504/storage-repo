@@ -65,7 +65,7 @@ python -m github_drive -h
 Upload a file or folder:
 
 ```sh
-python -m github_drive upload /path/to/folder --workers 4 --retries 3
+python -m github_drive upload /path/to/folder --workers 2 --retries 3
 ```
 
 Upload layout is chosen automatically. Tiny-file-heavy folders are bundled before upload; larger files are chunked when needed.
@@ -94,7 +94,7 @@ python -m github_drive list
 Download an archive (by tag, archive id, or release id):
 
 ```sh
-python -m github_drive download --tag github-drive-XXXXXX /path/to/output --workers 4
+python -m github_drive download --tag github-drive-XXXXXX /path/to/output --workers 2
 python -m github_drive download --archive-id XXXXXX /path/to/output
 python -m github_drive download --release-id 12345678 /path/to/output
 ```
@@ -111,7 +111,7 @@ python -m github_drive delete --tag github-drive-XXXXXX
 python -m github_drive web
 ```
 
-Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant**: every visitor signs in with their own username and password and supplies their own GitHub PAT and repository. Archives, tasks, and credentials are isolated per user.
+Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant**: every visitor signs in with either a local account or GitHub OAuth and supplies their own GitHub PAT and repository. Archives, tasks, and credentials are isolated per user.
 
 ### Multi-user model
 
@@ -122,7 +122,7 @@ Starts a local server at `http://127.0.0.1:8765`. The frontend is **multi-tenant
 | GitHub PAT | Encrypted at rest with AES-128-GCM, key derived from `GITHUB_DRIVE_SESSION_SECRET` + username. Rotating the session secret invalidates stored PATs and forces every user to re-enter theirs. |
 | Encryption key for archive contents | Derived from `GITHUB_DRIVE_ENCRYPTION_KEY` (or session secret fallback) HMAC-mixed with the username, so two users on the same server cannot decrypt each other's archives. |
 | Tasks | Each task records its `user_id`; `/api/tasks` only returns the caller's. Background runners use the per-user PAT. |
-| Signup | Controlled by `GITHUB_DRIVE_ALLOW_SIGNUP` (`true` by default for local/dev compatibility). For hosted deployments, set it to `false` after creating accounts with the CLI, or combine it with `GITHUB_DRIVE_BASIC_AUTH` as an outer gate. |
+| Signup | Controlled by `GITHUB_DRIVE_ALLOW_SIGNUP` (`true` by default for local/dev compatibility). To allow only GitHub-based self-serve signup, set `GITHUB_DRIVE_ALLOW_SIGNUP=false` and `GITHUB_DRIVE_ALLOW_GITHUB_OAUTH_SIGNUP=true`. |
 
 ### External database (Postgres)
 
@@ -186,11 +186,14 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_BASIC_AUTH` | optional outer gate | `user:password`. When set, every route (including `/login`) is wrapped in HTTP Basic. Useful as an outer perimeter on top of per-user logins; not a replacement for them. `/healthz` stays open for platform probes. |
 | `GITHUB_DRIVE_ADMIN_USERS` | optional | Comma- or space-separated usernames that may list and remove accounts through admin APIs. |
 | `GITHUB_DRIVE_ALLOW_SIGNUP` | optional | `true`/`false`; defaults to `true`. Set to `false` on public hosted instances after provisioning users. The bundled Render blueprint sets this to `false`. |
+| `GITHUB_DRIVE_ALLOW_GITHUB_OAUTH_SIGNUP` | optional | `true`/`false`; defaults to the value of `GITHUB_DRIVE_ALLOW_SIGNUP`. Set this to `true` with password signup disabled to make GitHub OAuth the only public signup path. |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | optional | Enables "Continue with GitHub" login/signup. Create a GitHub OAuth App and set the callback URL to `/auth/github/callback`. |
 | `GITHUB_OAUTH_REDIRECT_URI` | optional | Explicit callback URL, useful behind custom domains. Example: `https://your-domain.example/auth/github/callback`. |
 | `GITHUB_OAUTH_SCOPE` | optional | Defaults to `repo read:user user:email`, so the OAuth token can access the user's chosen archive repo. |
+| `GITHUB_DRIVE_TURNSTILE_SITE_KEY` / `GITHUB_DRIVE_TURNSTILE_SECRET_KEY` | optional but recommended for public deployments | Enables Cloudflare Turnstile on login, password signup, and GitHub OAuth start. If set, the app validates `cf-turnstile-response` server-side before any auth attempt proceeds. |
 | `GITHUB_DRIVE_MIRROR_ENV_TOKEN` | optional, legacy | `1` to copy `GITHUB_DRIVE_TOKEN` into `token.json` at web startup. Leave unset for hosted multi-user deployments to avoid storing a plaintext operator PAT on disk. |
 | `GITHUB_DRIVE_ENABLE_DB_CHECK` | optional diagnostic | `1` to enable `/api/db-check` for signed-in users. It is disabled by default so public deployments do not expose database details. |
+| `GITHUB_DRIVE_DB_WARM_TOKEN` | optional warm-up secret | Enables `/warm-db`, a secret-protected endpoint for external cron jobs that should wake Postgres/Neon by running `SELECT 1`. Pass the token as `?token=...` or `X-Warm-Token`. |
 | `GITHUB_DRIVE_USER_ID` | optional, legacy | Namespace for the legacy derivation. Only consulted when `GITHUB_DRIVE_ENCRYPTION_KEY` is not set. |
 | `GITHUB_DRIVE_ENCRYPT` | optional | `1` to encrypt every web upload by default. |
 | `GITHUB_DRIVE_MAX_UPLOAD_BYTES` | optional | Max single-request upload size. Default 5 GB. |
@@ -198,10 +201,13 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_MAX_FILES_PER_UPLOAD` | optional | Max files accepted in one browser upload. Default 5000. |
 | `GITHUB_DRIVE_AUTH_RATE_LIMIT` / `GITHUB_DRIVE_AUTH_RATE_WINDOW_SECONDS` | optional | Login/signup/OAuth attempt limiter. Defaults: 20 attempts per 15 minutes per IP. |
 | `GITHUB_DRIVE_USER_ACTION_RATE_LIMIT` / `GITHUB_DRIVE_USER_ACTION_RATE_WINDOW_SECONDS` | optional | Per-user API action limiter. Defaults: 60 actions per 60 seconds. |
+| `GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL` | optional | Global active transfer cap. Default `0` (disabled). Set to `1` on free/shared hosting to turn queued transfers into a simple in-process FIFO. |
 | `GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER` | optional | Max queued/running transfers per user. Default 3. Use `0` to disable. |
+| `GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_RELEASE_ASSETS_CACHE_TTL_SECONDS` | optional | In-memory GitHub metadata cache TTLs. Defaults: 30 seconds each. These sharply reduce repeated release/asset listing calls on the home page and archive browser. |
+| `GITHUB_DRIVE_ASSET_BYTES_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_ASSET_BYTES_CACHE_MAX_BYTES` | optional | Cache small asset payloads such as `_manifest.json` and generated `_cover.jpg`. Defaults: 600 seconds and 2 MiB. |
 | `GITHUB_DRIVE_STATE_DIR` | optional, only relevant without a database | Directory for persistent local state (`users.json`, `token.json`). Use a mounted disk if you have one. Ignored once `GITHUB_DRIVE_DATABASE_URL` is set, which is the recommended path on platforms without persistent disks (e.g. Render free tier). |
 | `GITHUB_DRIVE_DATABASE_URL` | strongly recommended on hosted installs | Postgres connection string. Accepts both `postgres://` and `postgresql://` schemes. When set, all account data lives in the database instead of `users.json`. Falls back to `DATABASE_URL` if the prefixed version is unset. |
-| `GITHUB_DRIVE_DB_MIN_CONNECTIONS` / `GITHUB_DRIVE_DB_MAX_CONNECTIONS` | optional | Pool sizing. Defaults: 1 / 10. |
+| `GITHUB_DRIVE_DB_MIN_CONNECTIONS` / `GITHUB_DRIVE_DB_MAX_CONNECTIONS` | optional | Pool sizing. Defaults: 0 / 4. |
 | `PORT` | injected by host | Standard PaaS variable; the app reads it automatically. |
 
 ### Hosted vs local: ephemeral filesystem
@@ -212,9 +218,31 @@ For Render, mount a persistent disk and point `GITHUB_DRIVE_STATE_DIR` at it. Th
 
 `/healthz` is intentionally minimal and only returns `{"ok": true}` for platform liveness checks. For database diagnostics, temporarily set `GITHUB_DRIVE_ENABLE_DB_CHECK=1`, sign in, and open `/api/db-check`; disable it again after troubleshooting.
 
+If you are using Neon free and want to keep the database warm, set `GITHUB_DRIVE_DB_WARM_TOKEN` and point an external cron at:
+
+```text
+https://your-app.onrender.com/warm-db?token=YOUR_SECRET
+```
+
+Run it every 4 minutes so Neon does not scale to zero between requests.
+
 ### Deploy targets
 
 **Render:** push the repo and click "New Blueprint" — Render reads `render.yaml`, provisions Postgres, generates `GITHUB_DRIVE_SESSION_SECRET`, disables public signup by default, and prompts you for the rest. Health check at `/healthz`.
+
+### Free public beta checklist
+
+If you want the safest low-cost public setup for this repo without redesigning the transfer architecture yet:
+
+1. Set `GITHUB_DRIVE_ALLOW_SIGNUP=false`.
+2. Set `GITHUB_DRIVE_ALLOW_GITHUB_OAUTH_SIGNUP=true`.
+3. Configure `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, and `GITHUB_OAUTH_REDIRECT_URI`.
+4. Configure `GITHUB_DRIVE_TURNSTILE_SITE_KEY` and `GITHUB_DRIVE_TURNSTILE_SECRET_KEY`.
+5. Use Neon pooled Postgres and set `GITHUB_DRIVE_DB_MAX_CONNECTIONS=4`.
+6. Set `GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL=1`.
+7. Set `GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER=1`.
+8. Keep `GITHUB_DRIVE_DB_WARM_TOKEN` enabled and ping `/warm-db` every 4 minutes on Neon free.
+9. Leave the GitHub metadata cache TTLs enabled so archive listing and browsing reuse recent release/asset responses.
 
 **Docker (any host):**
 
@@ -232,7 +260,9 @@ docker run --rm -p 8765:8765 \
 
 ### Hosting limits
 
-- Single Gunicorn worker, 8 threads by default. Task metadata is persisted to Postgres when configured, but the actual transfer worker still runs inside the web process, so keep `--workers` at 1 unless you move transfers to a dedicated queue.
+- Single Gunicorn worker, 4 threads by default. Task metadata is persisted to Postgres when configured, but the actual transfer worker still runs inside the web process, so keep `--workers` at 1 unless you move transfers to a dedicated queue.
+- Web uploads and downloads default to 2 internal workers each, and the app can optionally serialize public traffic through `GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL=1`.
+- Release listings, release assets, manifests, and cover images are cached in-process for short TTLs to cut repeated GitHub API traffic during home-page refreshes and archive browsing.
 - Per-asset cap: 2 GB (GitHub Releases). Larger files need to be split before upload.
 - API rate limit: 5,000 authenticated requests/hour per token. Auto-bundle mode exists mainly to protect this budget on tiny-file-heavy uploads.
 

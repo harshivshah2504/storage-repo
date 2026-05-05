@@ -8,7 +8,7 @@ services:
     name: github-drive
     runtime: python
     buildCommand: pip install -r requirements.txt && pip install -e .
-    startCommand: gunicorn "github_drive.webapp:create_app()" --bind "0.0.0.0:$PORT" --workers 1 --threads 8 --timeout 600
+    startCommand: gunicorn "github_drive.webapp:create_app()" --bind "0.0.0.0:$PORT" --workers 1 --threads 4 --timeout 600
     healthCheckPath: /healthz
     envVars:
       - key: GITHUB_DRIVE_SESSION_SECRET
@@ -39,15 +39,39 @@ services:
         sync: false
       - key: GITHUB_DRIVE_ALLOW_SIGNUP
         value: "false"
+      - key: GITHUB_DRIVE_ALLOW_GITHUB_OAUTH_SIGNUP
+        value: "true"
+      - key: GITHUB_DRIVE_TURNSTILE_SITE_KEY
+        sync: false
+      - key: GITHUB_DRIVE_TURNSTILE_SECRET_KEY
+        sync: false
+      - key: GITHUB_DRIVE_DB_WARM_TOKEN
+        sync: false
       - key: GITHUB_DRIVE_DB_MIN_CONNECTIONS
         value: "0"
       - key: GITHUB_DRIVE_DB_MAX_CONNECTIONS
         value: "4"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL
+        value: "1"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER
+        value: "1"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_UPLOADS_PER_USER
+        value: "1"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_DOWNLOADS_PER_USER
+        value: "1"
+      - key: GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS
+        value: "30"
+      - key: GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS
+        value: "30"
+      - key: GITHUB_DRIVE_RELEASE_ASSETS_CACHE_TTL_SECONDS
+        value: "30"
+      - key: GITHUB_DRIVE_ASSET_BYTES_CACHE_TTL_SECONDS
+        value: "600"
+      - key: GITHUB_DRIVE_ASSET_BYTES_CACHE_MAX_BYTES
+        value: "2097152"
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
         sync: false
       - key: GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES
         sync: false
       - key: GITHUB_DRIVE_MAX_FILES_PER_UPLOAD
-        sync: false
-      - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER
         sync: false
