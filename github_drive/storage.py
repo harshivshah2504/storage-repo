@@ -430,7 +430,7 @@ def append_to_archive(
     release_id: Optional[int] = None,
     tag: Optional[str] = None,
     archive_id: Optional[str] = None,
-    workers: int = 4,
+    workers: int = 2,
     recursive: bool = True,
     retries: int = 3,
     encrypt: bool = False,
@@ -592,7 +592,7 @@ def append_to_archive(
 def upload_archive(
     source_path: str,
     private_release: bool = False,
-    workers: int = 4,
+    workers: int = 2,
     recursive: bool = True,
     retries: int = 3,
     encrypt: bool = False,
@@ -1191,7 +1191,7 @@ def download_archive(
     tag: Optional[str] = None,
     archive_id: Optional[str] = None,
     destination_dir: str = "",
-    workers: int = 4,
+    workers: int = 2,
     skip_existing: bool = True,
     retries: int = 3,
     encode_key: Optional[bytes] = None,
@@ -1291,7 +1291,7 @@ def _build_download_items(
     manifest = None
     if MANIFEST_ASSET_NAME in by_name:
         try:
-            manifest_bytes = client.download_asset_bytes(by_name[MANIFEST_ASSET_NAME]["id"])
+            manifest_bytes = client.download_asset_bytes(by_name[MANIFEST_ASSET_NAME]["id"], use_cache=True)
             manifest = json.loads(manifest_bytes.decode("utf-8"))
         except (GitHubError, json.JSONDecodeError, UnicodeDecodeError):
             manifest = None
@@ -1676,7 +1676,7 @@ def _load_archive_snapshot(
     manifest = None
     if MANIFEST_ASSET_NAME in by_name:
         try:
-            manifest_bytes = client.download_asset_bytes(by_name[MANIFEST_ASSET_NAME]["id"])
+            manifest_bytes = client.download_asset_bytes(by_name[MANIFEST_ASSET_NAME]["id"], use_cache=True)
             manifest = json.loads(manifest_bytes.decode("utf-8"))
         except (GitHubError, json.JSONDecodeError, UnicodeDecodeError):
             manifest = None

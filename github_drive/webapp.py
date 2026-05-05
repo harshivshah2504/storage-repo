@@ -68,6 +68,10 @@ _TASK_PROGRESS_FLUSH_ITEMS = max(
 )
 _DOWNLOAD_DIRS: Dict[str, str] = {}
 _DOWNLOAD_LOCK = threading.Lock()
+_TASK_QUEUE: List[Dict[str, Any]] = []
+_TASK_QUEUE_COND = threading.Condition()
+_TASK_ACTIVE_RUNNERS = 0
+_TASK_DISPATCHER_STARTED = False
 
 
 def create_app() -> Flask:
@@ -96,6 +100,7 @@ def create_app() -> Flask:
     app.config["SESSION_COOKIE_SECURE"] = _cookie_secure_default()
     app.permanent_session_lifetime = 60 * 60 * 24 * 14  # 14 days
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    _ensure_task_dispatcher()
 
     @app.context_processor
     def inject_security_context():
@@ -127,14 +132,11 @@ def create_app() -> Flask:
         if request.path.startswith("/api/"):
             return jsonify({"error": message}), 503
         if request.path in {"/login", "/signup"}:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=users.signup_enabled(),
-                github_oauth_enabled=_github_oauth_enabled(),
+            return _render_auth_page(
                 mode="signup" if request.path == "/signup" else "login",
                 error=message,
-            ), 503
+                status=503,
+            )
         return Response(message, status=503, mimetype="text/plain")
 
     status = state_status()
@@ -254,40 +256,27 @@ def create_app() -> Flask:
 
     @app.get("/login")
     def login_page():
-        return render_template(
-            "login.html",
-            asset_version=_asset_version(),
-            allow_signup=users.signup_enabled(),
-            github_oauth_enabled=_github_oauth_enabled(),
-            mode="login",
-            error=None,
-        )
+        return _render_auth_page(mode="login")
 
     @app.post("/login")
     def login_submit():
         try:
             _limit_auth_attempt("login")
         except RateLimitExceeded as exc:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=users.signup_enabled(),
-                github_oauth_enabled=_github_oauth_enabled(),
-                mode="login",
-                error=str(exc),
-            ), 429
+            return _render_auth_page(mode="login", error=str(exc), status=429)
+        if _turnstile_enabled():
+            error = _verify_turnstile("login")
+            if error:
+                return _render_auth_page(mode="login", error=error, status=400)
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
         user = users.verify_password(username, password)
         if not user:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=users.signup_enabled(),
-                github_oauth_enabled=_github_oauth_enabled(),
+            return _render_auth_page(
                 mode="login",
                 error="Invalid username or password.",
-            ), 401
+                status=401,
+            )
         session.clear()
         session["user_id"] = user["username"]
         session.permanent = True
@@ -296,15 +285,10 @@ def create_app() -> Flask:
     @app.get("/signup")
     def signup_page():
         if not users.signup_enabled():
+            if _github_oauth_enabled() and _github_oauth_signup_enabled():
+                return _render_auth_page(mode="signup")
             return _signup_disabled_response()
-        return render_template(
-            "login.html",
-            asset_version=_asset_version(),
-            allow_signup=True,
-            github_oauth_enabled=_github_oauth_enabled(),
-            mode="signup",
-            error=None,
-        )
+        return _render_auth_page(mode="signup")
 
     @app.post("/signup")
     def signup_submit():
@@ -313,57 +297,48 @@ def create_app() -> Flask:
         try:
             _limit_auth_attempt("signup")
         except RateLimitExceeded as exc:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=True,
-                github_oauth_enabled=_github_oauth_enabled(),
-                mode="signup",
-                error=str(exc),
-            ), 429
+            return _render_auth_page(mode="signup", error=str(exc), status=429)
+        if _turnstile_enabled():
+            error = _verify_turnstile("signup")
+            if error:
+                return _render_auth_page(mode="signup", error=error, status=400)
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
         confirm = request.form.get("confirm_password") or ""
         if password != confirm:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=True,
-                github_oauth_enabled=_github_oauth_enabled(),
+            return _render_auth_page(
                 mode="signup",
                 error="Passwords do not match.",
-            ), 400
+                status=400,
+            )
         try:
             user = users.create_user(username, password)
         except ValueError as exc:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=True,
-                github_oauth_enabled=_github_oauth_enabled(),
-                mode="signup",
-                error=str(exc),
-            ), 400
+            return _render_auth_page(mode="signup", error=str(exc), status=400)
         session.clear()
         session["user_id"] = user["username"]
         session.permanent = True
         return redirect(url_for("index"))
 
-    @app.get("/auth/github")
+    @app.route("/auth/github", methods=["GET", "POST"])
     def github_oauth_start():
         if not _github_oauth_enabled():
             abort(404)
+        if _turnstile_enabled() and request.method != "POST":
+            return _render_auth_page(
+                mode="signup" if request.args.get("mode") == "signup" else "login",
+                error="Use the GitHub sign-in button to complete verification.",
+                status=405,
+            )
         try:
             _limit_auth_attempt("github-oauth")
         except RateLimitExceeded as exc:
-            return render_template(
-                "login.html",
-                asset_version=_asset_version(),
-                allow_signup=users.signup_enabled(),
-                github_oauth_enabled=True,
-                mode="login",
-                error=str(exc),
-            ), 429
+            return _render_auth_page(mode="login", error=str(exc), status=429)
+        if _turnstile_enabled():
+            error = _verify_turnstile("github-oauth")
+            if error:
+                mode = "signup" if (request.form.get("mode") or "").strip() == "signup" else "login"
+                return _render_auth_page(mode=mode, error=error, status=400)
         state = secrets.token_urlsafe(32)
         session["github_oauth_state"] = state
         params = {
@@ -371,7 +346,7 @@ def create_app() -> Flask:
             "redirect_uri": _github_oauth_redirect_uri(),
             "scope": (os.environ.get("GITHUB_OAUTH_SCOPE") or "repo read:user user:email").strip(),
             "state": state,
-            "allow_signup": "true" if users.signup_enabled() else "false",
+            "allow_signup": "true" if _github_oauth_signup_enabled() else "false",
         }
         return redirect(f"https://github.com/login/oauth/authorize?{urlencode(params)}")
 
@@ -389,7 +364,7 @@ def create_app() -> Flask:
         try:
             token = _github_oauth_exchange_code(code)
             profile = _github_oauth_profile(token)
-            if not users.signup_enabled() and not users.get_oauth_account(str(profile["id"])):
+            if not _github_oauth_signup_enabled() and not users.get_oauth_account(str(profile["id"])):
                 raise RuntimeError("Signup is disabled on this server. Contact the administrator to create an account.")
             user = users.create_oauth_user(
                 github_id=str(profile["id"]),
@@ -574,7 +549,7 @@ def create_app() -> Flask:
                 headers={"Cache-Control": "private, max-age=600"},
             )
         try:
-            data = client.download_asset_bytes(cover["id"])
+            data = client.download_asset_bytes(cover["id"], use_cache=True)
         except Exception:
             abort(404)
         return Response(
@@ -905,7 +880,7 @@ def create_app() -> Flask:
         payload = {
             "source_path": source_path,
             "private_release": request.form.get("private_release", "false").lower() == "true",
-            "workers": int(request.form.get("workers", 4)),
+            "workers": int(request.form.get("workers", 2)),
             "recursive": request.form.get("recursive", "true").lower() == "true",
             "retries": int(request.form.get("retries", 3)),
             "encrypt": encrypt,
@@ -957,7 +932,7 @@ def create_app() -> Flask:
                 "tag": tag,
                 "archive_id": archive_id,
                 "destination_dir": temp_dir,
-                "workers": int(payload.get("workers", 4)),
+                "workers": int(payload.get("workers", 2)),
                 "skip_existing": False,
                 "retries": int(payload.get("retries", 3)),
             },
@@ -1151,8 +1126,14 @@ def _create_task(task_type: str, user_id: str, payload: Dict[str, Any]) -> str:
 
 
 def _start_task_thread(task_id: str, runner) -> None:
-    thread = threading.Thread(target=runner, args=(task_id,), daemon=True)
-    thread.start()
+    max_active = _global_active_task_limit()
+    if max_active <= 0:
+        _launch_task_runner(task_id, runner, counted=False)
+        return
+    _ensure_task_dispatcher()
+    with _TASK_QUEUE_COND:
+        _TASK_QUEUE.append({"task_id": task_id, "runner": runner})
+        _TASK_QUEUE_COND.notify_all()
 
 
 def _get_task_internal(task_id: str) -> Optional[Dict]:
@@ -1386,14 +1367,10 @@ def _asset_version() -> str:
 
 
 def _signup_disabled_response():
-    return render_template(
-        "login.html",
-        asset_version=_asset_version(),
-        allow_signup=False,
-        github_oauth_enabled=_github_oauth_enabled(),
-        mode="login",
-        error="Signup is disabled on this server. Contact the administrator to create an account.",
-    ), 403
+    message = "Signup is disabled on this server. Contact the administrator to create an account."
+    if _github_oauth_enabled() and _github_oauth_signup_enabled():
+        message = "Create your account with GitHub on this server. Password signup is disabled."
+    return _render_auth_page(mode="login", error=message, status=403)
 
 
 def _csrf_token() -> str:
@@ -1470,6 +1447,13 @@ def _github_oauth_enabled() -> bool:
     )
 
 
+def _github_oauth_signup_enabled() -> bool:
+    raw = os.environ.get("GITHUB_DRIVE_ALLOW_GITHUB_OAUTH_SIGNUP")
+    if raw is None or not raw.strip():
+        return users.signup_enabled()
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _github_oauth_redirect_uri() -> str:
     configured = (os.environ.get("GITHUB_OAUTH_REDIRECT_URI") or "").strip()
     if configured:
@@ -1530,14 +1514,113 @@ def _github_oauth_profile(token: str) -> Dict[str, Any]:
 
 
 def _oauth_error(message: str):
-    return render_template(
+    return _render_auth_page(mode="login", error=message, status=400)
+
+
+def _render_auth_page(mode: str, error: Optional[str] = None, status: int = 200):
+    response = render_template(
         "login.html",
         asset_version=_asset_version(),
         allow_signup=users.signup_enabled(),
         github_oauth_enabled=_github_oauth_enabled(),
-        mode="login",
-        error=message,
-    ), 400
+        github_oauth_signup_enabled=_github_oauth_signup_enabled(),
+        turnstile_enabled=_turnstile_enabled(),
+        turnstile_site_key=(os.environ.get("GITHUB_DRIVE_TURNSTILE_SITE_KEY") or "").strip(),
+        mode=mode,
+        error=error,
+    )
+    return response, status
+
+
+def _turnstile_enabled() -> bool:
+    return bool(
+        (os.environ.get("GITHUB_DRIVE_TURNSTILE_SITE_KEY") or "").strip()
+        and (os.environ.get("GITHUB_DRIVE_TURNSTILE_SECRET_KEY") or "").strip()
+    )
+
+
+def _verify_turnstile(expected_action: str) -> Optional[str]:
+    import requests
+
+    token = (request.form.get("cf-turnstile-response") or "").strip()
+    if not token:
+        return "Complete the verification check and try again."
+    try:
+        response = requests.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={
+                "secret": os.environ["GITHUB_DRIVE_TURNSTILE_SECRET_KEY"].strip(),
+                "response": token,
+                "remoteip": _client_ip(),
+                "idempotency_key": str(uuid.uuid4()),
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        LOG.warning("Turnstile validation failed: %s", exc)
+        return "Human verification is temporarily unavailable. Please try again."
+    if not payload.get("success"):
+        LOG.warning("Turnstile rejected auth request: %s", payload.get("error-codes") or [])
+        return "Verification failed or expired. Please try again."
+    returned_action = str(payload.get("action") or "").strip()
+    if expected_action and returned_action and returned_action != expected_action:
+        LOG.warning("Turnstile action mismatch: expected %s, got %s", expected_action, returned_action)
+        return "Verification could not be confirmed. Please try again."
+    return None
+
+
+def _client_ip() -> str:
+    forwarded = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if forwarded:
+        return forwarded
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    return forwarded or request.remote_addr or "unknown"
+
+
+def _global_active_task_limit() -> int:
+    return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 0)
+
+
+def _ensure_task_dispatcher() -> None:
+    global _TASK_DISPATCHER_STARTED
+    with _TASK_QUEUE_COND:
+        if _TASK_DISPATCHER_STARTED:
+            return
+        thread = threading.Thread(target=_task_dispatcher_loop, daemon=True, name="github-drive-task-dispatcher")
+        thread.start()
+        _TASK_DISPATCHER_STARTED = True
+
+
+def _task_dispatcher_loop() -> None:
+    global _TASK_ACTIVE_RUNNERS
+
+    while True:
+        with _TASK_QUEUE_COND:
+            while True:
+                limit = max(1, _global_active_task_limit())
+                if _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < limit:
+                    queued = _TASK_QUEUE.pop(0)
+                    _TASK_ACTIVE_RUNNERS += 1
+                    break
+                _TASK_QUEUE_COND.wait(timeout=1.0)
+        _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
+
+
+def _launch_task_runner(task_id: str, runner, counted: bool) -> None:
+    def invoke() -> None:
+        global _TASK_ACTIVE_RUNNERS
+        try:
+            runner(task_id)
+        finally:
+            if counted:
+                with _TASK_QUEUE_COND:
+                    _TASK_ACTIVE_RUNNERS = max(0, _TASK_ACTIVE_RUNNERS - 1)
+                    _TASK_QUEUE_COND.notify_all()
+
+    thread = threading.Thread(target=invoke, daemon=True, name=f"github-drive-task-{task_id}")
+    thread.start()
 
 
 # ── hosting helpers ──────────────────────────────────────────────────────────
