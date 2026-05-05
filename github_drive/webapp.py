@@ -56,6 +56,16 @@ DEFAULT_USER_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB per browser upload by
 LOG = logging.getLogger("github_drive.webapp")
 
 _TASK_LOCK = threading.Lock()
+_TASK_CACHE: Dict[str, Dict[str, Any]] = {}
+_TASK_CACHE_META: Dict[str, Dict[str, Any]] = {}
+_TASK_PROGRESS_FLUSH_SECONDS = max(
+    0.25,
+    float(os.environ.get("GITHUB_DRIVE_TASK_PROGRESS_FLUSH_SECONDS", "1.5")),
+)
+_TASK_PROGRESS_FLUSH_ITEMS = max(
+    1,
+    int(os.environ.get("GITHUB_DRIVE_TASK_PROGRESS_FLUSH_ITEMS", "25")),
+)
 _DOWNLOAD_DIRS: Dict[str, str] = {}
 _DOWNLOAD_LOCK = threading.Lock()
 
@@ -378,7 +388,12 @@ def create_app() -> Flask:
     @app.get("/")
     @login_required
     def index():
-        return render_template("index.html", asset_version=_asset_version(), username=g.user_id)
+        return render_template(
+            "index.html",
+            asset_version=_asset_version(),
+            username=g.user_id,
+            storage_limit_bytes=_storage_limit_bytes(),
+        )
 
     # ── user / GitHub credentials API ────────────────────────────────────────
 
@@ -1078,6 +1093,9 @@ def _create_task(task_type: str, user_id: str, payload: Dict[str, Any]) -> str:
         "progress_done": 0,
     }
     task_store.create_task(task)
+    with _TASK_LOCK:
+        _TASK_CACHE[task_id] = _clone_task(task)
+        _mark_task_flushed(task_id, task)
     return task_id
 
 
@@ -1087,8 +1105,27 @@ def _start_task_thread(task_id: str, runner) -> None:
 
 
 def _get_task_internal(task_id: str) -> Optional[Dict]:
-    task = task_store.get_task(task_id)
-    return _serialize(task) if task else None
+    with _TASK_LOCK:
+        cached = _TASK_CACHE.get(task_id)
+        if cached is not None:
+            return _serialize(_clone_task(cached))
+    try:
+        task = task_store.get_task(task_id)
+    except Exception as exc:
+        from . import db as db_module
+
+        if isinstance(exc, db_module.DatabaseUnavailableError):
+            with _TASK_LOCK:
+                cached = _TASK_CACHE.get(task_id)
+                if cached is not None:
+                    return _serialize(_clone_task(cached))
+        raise
+    if not task:
+        return None
+    with _TASK_LOCK:
+        _TASK_CACHE.setdefault(task_id, _clone_task(task))
+        cached = _TASK_CACHE[task_id]
+    return _serialize(_clone_task(cached))
 
 
 def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
@@ -1101,20 +1138,60 @@ def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
 
 
 def _list_tasks(user_id: str) -> List[Dict]:
-    return [_serialize(t) for t in task_store.list_tasks(user_id)]
+    persisted: List[Dict[str, Any]] = []
+    db_busy = False
+    try:
+        persisted = [_clone_task(t) for t in task_store.list_tasks(user_id)]
+    except Exception as exc:
+        from . import db as db_module
+
+        if isinstance(exc, db_module.DatabaseUnavailableError):
+            db_busy = True
+            LOG.warning("Serving cached task list for %s because DB is busy.", user_id)
+        else:
+            raise
+    merged = {task["id"]: task for task in persisted}
+    with _TASK_LOCK:
+        cached_tasks = [
+            _clone_task(task)
+            for task in _TASK_CACHE.values()
+            if task.get("user_id") == user_id
+        ]
+    for task in cached_tasks:
+        merged[task["id"]] = task
+    if db_busy and not merged:
+        return []
+    rows = sorted(merged.values(), key=lambda task: float(task.get("created_at", 0) or 0), reverse=True)
+    return [_serialize(task) for task in rows]
 
 
 def _update_task(task_id: str, **updates) -> None:
-    updates["updated_at"] = time.time()
-    task_store.update_task(task_id, updates)
+    now = time.time()
+    updates["updated_at"] = now
+    task = _get_or_load_task(task_id)
+    if task is None:
+        return
+    with _TASK_LOCK:
+        cached = _TASK_CACHE.setdefault(task_id, _clone_task(task))
+        cached.update(updates)
+        snapshot = _clone_task(cached)
+        _TASK_CACHE_META.setdefault(task_id, {})["dirty"] = True
+    if _persist_task_updates(task_id, updates, tolerate_busy=True):
+        with _TASK_LOCK:
+            _mark_task_flushed(task_id, snapshot)
 
 
 def _task_progress(task_id: str, event: str, payload: Dict[str, Any]) -> None:
     message = _format_progress_message(event, payload)
+    now = time.time()
     with _TASK_LOCK:
-        task = task_store.get_task(task_id)
+        task = _TASK_CACHE.get(task_id)
+    if task is None:
+        task = _get_or_load_task(task_id)
         if task is None:
             return
+    with _TASK_LOCK:
+        task = _TASK_CACHE.setdefault(task_id, _clone_task(task))
         task["last_event"] = event
         if event in {"archive_created", "archive_downloading"}:
             task["progress_total"] = int(payload.get("total_items", 0))
@@ -1127,18 +1204,25 @@ def _task_progress(task_id: str, event: str, payload: Dict[str, Any]) -> None:
             task["progress_done"] = int(task.get("progress_done", 0)) + increment
         logs = list(task.get("logs") or [])
         logs.append({
-            "timestamp": time.time(),
+            "timestamp": now,
             "event": event,
             "message": message,
             "payload": payload,
         })
-        task_store.update_task(task_id, {
-            "updated_at": time.time(),
+        task["updated_at"] = now
+        task["logs"] = logs[-200:]
+        _TASK_CACHE_META.setdefault(task_id, {})["dirty"] = True
+        snapshot = _clone_task(task)
+        should_flush = _should_flush_task_progress(task_id, snapshot, event, now)
+    if should_flush and _persist_task_updates(task_id, {
+            "updated_at": now,
             "last_event": task.get("last_event"),
             "progress_total": task.get("progress_total", 0),
             "progress_done": task.get("progress_done", 0),
-            "logs": logs[-200:],
-        })
+            "logs": snapshot.get("logs", []),
+        }, tolerate_busy=True):
+        with _TASK_LOCK:
+            _mark_task_flushed(task_id, snapshot)
 
 
 def _format_progress_message(event: str, payload: Dict[str, Any]) -> str:
@@ -1163,6 +1247,72 @@ def _format_progress_message(event: str, payload: Dict[str, Any]) -> str:
     if event == "item_skipped":
         return f"Skipped {payload['relative_path']}"
     return f"{event}: {json.dumps(payload, ensure_ascii=True, default=str)}"
+
+
+def _clone_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    cloned = dict(task)
+    cloned["payload"] = dict(task.get("payload") or {})
+    cloned["logs"] = list(task.get("logs") or [])
+    return cloned
+
+
+def _get_or_load_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with _TASK_LOCK:
+        cached = _TASK_CACHE.get(task_id)
+        if cached is not None:
+            return _clone_task(cached)
+    try:
+        task = task_store.get_task(task_id)
+    except Exception as exc:
+        from . import db as db_module
+
+        if isinstance(exc, db_module.DatabaseUnavailableError):
+            with _TASK_LOCK:
+                cached = _TASK_CACHE.get(task_id)
+                if cached is not None:
+                    return _clone_task(cached)
+        raise
+    if not task:
+        return None
+    task = _clone_task(task)
+    with _TASK_LOCK:
+        _TASK_CACHE.setdefault(task_id, _clone_task(task))
+    return task
+
+
+def _persist_task_updates(task_id: str, updates: Dict[str, Any], tolerate_busy: bool) -> bool:
+    try:
+        task_store.update_task(task_id, updates)
+        return True
+    except Exception as exc:
+        from . import db as db_module
+
+        if tolerate_busy and isinstance(exc, db_module.DatabaseUnavailableError):
+            LOG.warning("Deferred task persistence for %s: %s", task_id, exc)
+            return False
+        raise
+
+
+def _mark_task_flushed(task_id: str, task: Dict[str, Any]) -> None:
+    meta = _TASK_CACHE_META.setdefault(task_id, {})
+    meta["last_flush_at"] = float(task.get("updated_at") or time.time())
+    meta["last_flush_done"] = int(task.get("progress_done") or 0)
+    meta["dirty"] = False
+
+
+def _should_flush_task_progress(task_id: str, task: Dict[str, Any], event: str, now: float) -> bool:
+    if event not in {"item_uploaded", "item_downloaded", "item_skipped"}:
+        return True
+    meta = _TASK_CACHE_META.setdefault(task_id, {})
+    last_flush_at = float(meta.get("last_flush_at") or 0.0)
+    last_flush_done = int(meta.get("last_flush_done") or 0)
+    done = int(task.get("progress_done") or 0)
+    total = int(task.get("progress_total") or 0)
+    if total > 0 and done >= total:
+        return True
+    if done - last_flush_done >= _TASK_PROGRESS_FLUSH_ITEMS:
+        return True
+    return (now - last_flush_at) >= _TASK_PROGRESS_FLUSH_SECONDS
 
 
 def _serialize(value):
@@ -1456,6 +1606,17 @@ def _normalize_virtual_path(path: str) -> str:
 def _safe_download_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", str(value or "").strip()).strip(" .")
     return cleaned or "download"
+
+
+def _storage_limit_bytes() -> Optional[int]:
+    raw = (os.environ.get("GITHUB_DRIVE_STORAGE_LIMIT_BYTES") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 # ── entry point ──────────────────────────────────────────────────────────────
