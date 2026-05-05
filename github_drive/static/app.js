@@ -493,6 +493,23 @@ function updatePageChrome() {
     : `${count} item${count === 1 ? "" : "s"}${created ? ` · ${created}` : ""}`;
 }
 
+async function deleteArchiveRecord(archive) {
+  if (!archive?.release_id) return;
+  if (!confirm(`Delete "${archiveTitle(archive)}" permanently?`)) return;
+  try {
+    await fetchJson(`/api/archives/${archive.release_id}`, { method: "DELETE" });
+    if (state.selectedArchive && state.selectedArchive.release_id === archive.release_id) {
+      state.selectedArchive = null;
+      state.selectedArchiveContents = null;
+      state.selectedArchivePath = "";
+      showArchiveListView();
+    }
+    await loadArchives();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 function syncArchiveBrowserToolbar() {
   const archive = state.selectedArchive;
   const contents = state.selectedArchiveContents;
@@ -651,6 +668,11 @@ function renderArchives() {
     return `
       <div class="archive-card" data-index="${index}">
         <div class="archive-thumb">
+          <div class="archive-card-actions">
+            <button type="button" class="icon-button archive-card-action" data-delete-archive-index="${index}" title="Delete archive" aria-label="Delete archive">
+              ${ICON_DELETE}
+            </button>
+          </div>
           ${thumb}
           <span class="archive-kind-pill">${escapeHtml(kindLabel)}${meta.encrypted ? " · encrypted" : ""}</span>
         </div>
@@ -684,6 +706,13 @@ function renderArchives() {
       event.preventDefault();
       const archive = state.filteredArchives[Number(card.dataset.index)];
       if (archive) showArchiveContextMenu(event.clientX, event.clientY, archive);
+    });
+  });
+  grid.querySelectorAll("[data-delete-archive-index]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const archive = state.filteredArchives[Number(button.dataset.deleteArchiveIndex)];
+      await deleteArchiveRecord(archive);
     });
   });
 }
@@ -1621,7 +1650,11 @@ function renderArchivesList(archives) {
         <div>${count} item${count === 1 ? "" : "s"}</div>
         <div>${escapeHtml(created)}</div>
         <div><code>${escapeHtml(archive.tag)}</code></div>
-        <div>${escapeHtml(kindLabel)}</div>
+        <div class="archive-list-actions">
+          <button type="button" class="icon-button archive-card-action" data-delete-archive-index="${index}" title="Delete archive" aria-label="Delete archive">
+            ${ICON_DELETE}
+          </button>
+        </div>
       </div>
     `;
   }).join("");
@@ -1634,6 +1667,13 @@ function renderArchivesList(archives) {
       event.preventDefault();
       const archive = state.filteredArchives[Number(row.dataset.index)];
       if (archive) showArchiveContextMenu(event.clientX, event.clientY, archive);
+    });
+  });
+  body.querySelectorAll("[data-delete-archive-index]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const archive = state.filteredArchives[Number(button.dataset.deleteArchiveIndex)];
+      await deleteArchiveRecord(archive);
     });
   });
 }
@@ -1771,13 +1811,7 @@ function showArchiveContextMenu(x, y, archive) {
         if (archive.html_url) window.open(archive.html_url, "_blank");
       } },
     { divider: true },
-    { label: "Delete archive", icon: ICON_DELETE, destructive: true, onClick: async () => {
-        if (!confirm(`Delete "${archiveTitle(archive)}" permanently?`)) return;
-        try {
-          await fetchJson(`/api/archives/${archive.release_id}`, { method: "DELETE" });
-          await loadArchives();
-        } catch (error) { alert(error.message); }
-      } },
+    { label: "Delete archive", icon: ICON_DELETE, destructive: true, onClick: async () => deleteArchiveRecord(archive) },
   ];
   buildContextMenu(items, x, y);
 }
