@@ -205,6 +205,7 @@ The web app is deployable as a single-process Flask/Gunicorn service. The reposi
 | `GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER` | optional | Max queued/running transfers per user. Default 3. Use `0` to disable. |
 | `GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_RELEASE_ASSETS_CACHE_TTL_SECONDS` | optional | In-memory GitHub metadata cache TTLs. Defaults: 30 seconds each. These sharply reduce repeated release/asset listing calls on the home page and archive browser. |
 | `GITHUB_DRIVE_ASSET_BYTES_CACHE_TTL_SECONDS` / `GITHUB_DRIVE_ASSET_BYTES_CACHE_MAX_BYTES` | optional | Cache small asset payloads such as `_manifest.json` and generated `_cover.jpg`. Defaults: 600 seconds and 2 MiB. |
+| `GITHUB_DRIVE_ARCHIVES_PAGE_SIZE` | optional | Number of archives the home page loads per request. Default `24`. Older archives are fetched with the UI's "Load more" control instead of walking the full releases history on first load. |
 | `GITHUB_DRIVE_STATE_DIR` | optional, only relevant without a database | Directory for persistent local state (`users.json`, `token.json`). Use a mounted disk if you have one. Ignored once `GITHUB_DRIVE_DATABASE_URL` is set, which is the recommended path on platforms without persistent disks (e.g. Render free tier). |
 | `GITHUB_DRIVE_DATABASE_URL` | strongly recommended on hosted installs | Postgres connection string. Accepts both `postgres://` and `postgresql://` schemes. When set, all account data lives in the database instead of `users.json`. Falls back to `DATABASE_URL` if the prefixed version is unset. |
 | `GITHUB_DRIVE_DB_MIN_CONNECTIONS` / `GITHUB_DRIVE_DB_MAX_CONNECTIONS` | optional | Pool sizing. Defaults: 0 / 4. |
@@ -243,6 +244,7 @@ If you want the safest low-cost public setup for this repo without redesigning t
 7. Set `GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER=1`.
 8. Keep `GITHUB_DRIVE_DB_WARM_TOKEN` enabled and ping `/warm-db` every 4 minutes on Neon free.
 9. Leave the GitHub metadata cache TTLs enabled so archive listing and browsing reuse recent release/asset responses.
+10. Keep `GITHUB_DRIVE_ARCHIVES_PAGE_SIZE` modest so the home page loads recent archives first and only fetches older pages on demand.
 
 **Docker (any host):**
 
@@ -263,6 +265,7 @@ docker run --rm -p 8765:8765 \
 - Single Gunicorn worker, 4 threads by default. Task metadata is persisted to Postgres when configured, but the actual transfer worker still runs inside the web process, so keep `--workers` at 1 unless you move transfers to a dedicated queue.
 - Web uploads and downloads default to 2 internal workers each, and the app can optionally serialize public traffic through `GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL=1`.
 - Release listings, release assets, manifests, and cover images are cached in-process for short TTLs to cut repeated GitHub API traffic during home-page refreshes and archive browsing.
+- The home page loads archives in pages instead of traversing the entire releases history on every refresh; older archives are fetched on demand with "Load more".
 - Per-asset cap: 2 GB (GitHub Releases). Larger files need to be split before upload.
 - API rate limit: 5,000 authenticated requests/hour per token. Auto-bundle mode exists mainly to protect this budget on tiny-file-heavy uploads.
 

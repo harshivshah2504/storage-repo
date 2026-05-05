@@ -69,6 +69,8 @@ services:
         value: "600"
       - key: GITHUB_DRIVE_ASSET_BYTES_CACHE_MAX_BYTES
         value: "2097152"
+      - key: GITHUB_DRIVE_ARCHIVES_PAGE_SIZE
+        value: "24"
       - key: GITHUB_DRIVE_MAX_UPLOAD_BYTES
         sync: false
       - key: GITHUB_DRIVE_USER_MAX_UPLOAD_BYTES
