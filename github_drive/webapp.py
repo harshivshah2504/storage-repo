@@ -1017,6 +1017,15 @@ def _run_upload_task(task_id: str) -> None:
         append_tag = payload.pop("append_tag", None)
         append_relative_path = payload.pop("append_relative_path", None)
         if append_tag:
+            # Append mode targets an existing archive, so creation/resume-only knobs from the
+            # generic upload payload must not be forwarded to append_to_archive().
+            payload.pop("private_release", None)
+            payload.pop("upload_mode", None)
+            payload.pop("source_name_override", None)
+            payload.pop("source_type_override", None)
+            payload.pop("resume_release_id", None)
+            payload.pop("resume_tag", None)
+            payload.pop("resume_archive_id", None)
             result = append_to_archive(
                 client=client,
                 progress=lambda event, data: _task_progress(task_id, event, data),
