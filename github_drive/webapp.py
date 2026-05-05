@@ -156,6 +156,48 @@ def create_app() -> Flask:
         """Pure liveness probe. Never exposes state paths, database details, or repo data."""
         return jsonify({"ok": True})
 
+    @app.get("/warm-db")
+    def warm_db():
+        """Secret-protected endpoint for external cron jobs to wake the database."""
+        from . import db as _db
+
+        expected_token = (os.environ.get("GITHUB_DRIVE_DB_WARM_TOKEN") or "").strip()
+        if not expected_token:
+            abort(404)
+        supplied_token = _warm_db_token()
+        if not supplied_token or not secrets.compare_digest(supplied_token, expected_token):
+            return jsonify({"ok": False, "error": "Forbidden"}), 403
+        if not _db.is_enabled():
+            return jsonify({"ok": False, "error": "GITHUB_DRIVE_DATABASE_URL is not set."}), 503
+
+        result_holder: Dict[str, Any] = {}
+        done = threading.Event()
+
+        def probe() -> None:
+            from . import db as inner_db
+            try:
+                with inner_db.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
+                result_holder["result"] = {"ok": True, "warmed": True}
+            except Exception as exc:
+                result_holder["result"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=probe, daemon=True, name="warm-db")
+        thread.start()
+
+        if not done.wait(timeout=20.0):
+            return jsonify({
+                "ok": False,
+                "error": "DB warm-up did not complete in 20 s. Provider may still be waking up.",
+            }), 504
+
+        result = result_holder.get("result", {"ok": False, "error": "no result captured"})
+        return jsonify(result), (200 if result.get("ok") else 503)
+
     @app.get("/api/db-check")
     def api_db_check():
         """Hard-bounded DB connectivity diagnostic. Runs the connection attempt in a
@@ -1544,7 +1586,7 @@ def _make_basic_auth_guard(expected: tuple):
     expected_user, expected_password = expected
 
     def guard():
-        if request.path == "/healthz":
+        if request.path in {"/healthz", "/warm-db"}:
             return None
         header = request.headers.get("Authorization", "")
         if header.startswith("Basic "):
@@ -1562,6 +1604,13 @@ def _make_basic_auth_guard(expected: tuple):
         )
 
     return guard
+
+
+def _warm_db_token() -> str:
+    return (
+        (request.args.get("token") or "").strip()
+        or (request.headers.get("X-Warm-Token") or "").strip()
+    )
 
 
 def _browser_upload_root_folder(relative_paths: List[str]) -> Optional[str]:
