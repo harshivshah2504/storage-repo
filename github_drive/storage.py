@@ -223,10 +223,14 @@ def delete_archive_file(
             client.delete_asset(int(asset_id))
 
     remaining_paths = [item.get("relative_path") or "" for item in remaining_items]
+    preserved_folders = list(archive_meta.get("virtual_folders") or [])
+    deleted_parent = _normalize_folder_path(relative_path.rsplit("/", 1)[0] if "/" in relative_path else "")
+    if deleted_parent:
+        preserved_folders.append(deleted_parent)
     archive_meta["total_items"] = len(remaining_items)
     archive_meta["kinds"] = _classify_relative_paths(remaining_paths)
     archive_meta["virtual_folders"] = _normalize_virtual_folders(
-        archive_meta.get("virtual_folders"),
+        preserved_folders,
         remaining_paths,
     )
     archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(
