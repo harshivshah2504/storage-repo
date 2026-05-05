@@ -626,7 +626,7 @@ def create_app() -> Flask:
             client = _user_client(g.user_id)
             result = create_empty_archive(
                 source_name=folder_name,
-                initial_folder_path=folder_name,
+                initial_folder_path="",
                 private_release=bool(payload.get("private_release", False)),
                 client=client,
             )

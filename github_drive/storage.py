@@ -340,8 +340,8 @@ def create_empty_archive(
 ) -> ArchiveManifest:
     client = client or get_client()
     normalized_name = (source_name or "").strip() or "Untitled folder"
-    normalized_root = _normalize_folder_path(initial_folder_path or normalized_name)
-    virtual_folders = _normalize_virtual_folders([normalized_root], [])
+    normalized_root = _normalize_folder_path(initial_folder_path)
+    virtual_folders = _normalize_virtual_folders([normalized_root] if normalized_root else [], [])
     created_at = now_utc_iso()
     archive_meta = {
         "storage_format": STORAGE_FORMAT,
