@@ -3,6 +3,10 @@
 const state = {
   archives: [],
   filteredArchives: [],
+  archivePage: 0,
+  archivePageSize: 24,
+  archiveHasMore: false,
+  archiveLoading: false,
   searchTerm: "",
   selectedArchive: null,
   selectedArchiveContents: null,
@@ -137,12 +141,16 @@ function updateStorageUsage() {
   const percentLabel = $("storageUsagePercent");
   const fill = $("storageBarFill");
   if (label) {
-    label.textContent = limitBytes > 0
-      ? `${formatBytes(totalBytes)} of ${formatBytes(limitBytes)} used`
-      : `${formatBytes(totalBytes)} used`;
+    if (state.archiveHasMore) {
+      label.textContent = `${formatBytes(totalBytes)} used in loaded archives`;
+    } else {
+      label.textContent = limitBytes > 0
+        ? `${formatBytes(totalBytes)} of ${formatBytes(limitBytes)} used`
+        : `${formatBytes(totalBytes)} used`;
+    }
   }
   if (percentLabel) {
-    percentLabel.textContent = limitBytes > 0
+    percentLabel.textContent = (limitBytes > 0 && !state.archiveHasMore)
       ? `${Math.min(999, Math.round((totalBytes / limitBytes) * 100))}%`
       : "";
   }
@@ -151,7 +159,9 @@ function updateStorageUsage() {
       ? Math.max(0, Math.min(100, (totalBytes / limitBytes) * 100))
       : (totalBytes > 0 ? 100 : 0);
     fill.style.width = `${pct}%`;
-    fill.style.opacity = limitBytes > 0 ? "1" : (totalBytes > 0 ? "0.45" : "0.2");
+    fill.style.opacity = state.archiveHasMore
+      ? "0.45"
+      : (limitBytes > 0 ? "1" : (totalBytes > 0 ? "0.45" : "0.2"));
   }
 }
 
@@ -324,7 +334,7 @@ async function submitCreds(event) {
     form.reset();
     closeModal("credsModal");
     await loadMe();
-    await loadArchives();
+    await loadArchives({ reset: true });
     showFlash(`Connected to ${result.repo}`);
   } catch (error) {
     if (handleCredentialError(error)) return;
@@ -338,8 +348,7 @@ async function clearCreds() {
     await fetchJson("/api/me/credentials", { method: "DELETE" });
     closeModal("credsModal");
     await loadMe();
-    state.archives = [];
-    renderArchives();
+    await loadArchives({ reset: true });
   } catch (error) {
     if (handleCredentialError(error)) return;
     alert(error.message);
@@ -480,7 +489,9 @@ function updatePageChrome() {
   const archive = state.selectedArchive;
   if (!archive) {
     title.textContent = "My Drive";
-    subtitle.textContent = "";
+    subtitle.textContent = state.archiveHasMore
+      ? `${state.archives.length} recent archive${state.archives.length === 1 ? "" : "s"} loaded`
+      : `${state.archives.length} archive${state.archives.length === 1 ? "" : "s"}`;
     return;
   }
   const path = normalizeArchivePath(state.selectedArchivePath);
@@ -491,6 +502,36 @@ function updatePageChrome() {
   subtitle.textContent = path
     ? archiveTitle(archive)
     : `${count} item${count === 1 ? "" : "s"}${created ? ` · ${created}` : ""}`;
+}
+
+function mergeArchives(existing, incoming) {
+  const merged = new Map();
+  for (const archive of existing || []) merged.set(archive.release_id, archive);
+  for (const archive of incoming || []) merged.set(archive.release_id, archive);
+  return Array.from(merged.values());
+}
+
+function syncArchivesPagination() {
+  const wrapper = $("archivesPagination");
+  const button = $("loadMoreArchivesButton");
+  const note = $("archivesPaginationNote");
+  if (!wrapper || !button || !note) return;
+
+  const hasLoadedAny = state.archives.length > 0;
+  const show = hasLoadedAny && (state.archiveHasMore || state.archiveLoading);
+  wrapper.style.display = show ? "" : "none";
+  button.disabled = state.archiveLoading || !state.archiveHasMore;
+  button.textContent = state.archiveLoading ? "Loading..." : "Load more";
+
+  if (state.archiveHasMore) {
+    note.textContent = state.searchTerm.trim()
+      ? "Search and filters apply to the loaded archives. Load more to include older results."
+      : "Showing recent archives first. Load more to fetch older releases.";
+  } else if (state.archiveLoading) {
+    note.textContent = "Loading more archives…";
+  } else {
+    note.textContent = "";
+  }
 }
 
 async function deleteArchiveRecord(archive) {
@@ -638,6 +679,7 @@ function renderArchives() {
   const empty = $("archivesEmpty");
   // List view always renders alongside the grid; toggle handles visibility.
   renderArchivesList(state.filteredArchives);
+  syncArchivesPagination();
   if (!state.filteredArchives.length) {
     grid.innerHTML = "";
     show("archivesGrid", false);
@@ -715,6 +757,7 @@ function renderArchives() {
       await deleteArchiveRecord(archive);
     });
   });
+  syncArchivesPagination();
 }
 
 // ── Filter chips ──────────────────────────────────────────────────────────────
@@ -1105,36 +1148,61 @@ async function deleteArchiveEntry(relativePath) {
       state.selectedArchiveContents = null;
       state.selectedArchivePath = "";
       showArchiveListView();
-      await loadArchives();
+      await loadArchives({ reset: true });
       return;
     }
     await loadSelectedArchiveContents();
-    await loadArchives();
+    await loadArchives({ reset: true });
   } catch (error) {
     alert(error.message);
   }
 }
 
-async function loadArchives() {
+async function loadArchives(options = {}) {
+  const reset = options.reset !== false;
   if (!state.me.token_present || !state.me.repo) {
     state.archives = [];
+    state.archivePage = 0;
+    state.archiveHasMore = false;
+    state.archiveLoading = false;
     showArchiveListView();
     renderArchives();
     updateStorageUsage();
     return;
   }
+  if (state.archiveLoading) return;
+  state.archiveLoading = true;
+  syncArchivesPagination();
   try {
-    const payload = await fetchJson("/api/archives");
-    state.archives = payload.archives || [];
+    const targetPage = reset ? 1 : Math.max(1, state.archivePage + 1);
+    const payload = await fetchJson(`/api/archives?page=${targetPage}&per_page=${state.archivePageSize}`);
+    const archives = payload.archives || [];
+    state.archives = reset ? archives : mergeArchives(state.archives, archives);
+    state.archivePage = Number(payload.page || targetPage);
+    state.archivePageSize = Number(payload.per_page || state.archivePageSize || 24);
+    state.archiveHasMore = Boolean(payload.has_more);
     renderArchives();
     updateStorageUsage();
+    updatePageChrome();
   } catch (error) {
-    state.archives = [];
+    if (reset) {
+      state.archives = [];
+      state.archivePage = 0;
+      state.archiveHasMore = false;
+    }
     renderArchives();
     updateStorageUsage();
     handleCredentialError(error);
     console.error("loadArchives", error);
+  } finally {
+    state.archiveLoading = false;
+    syncArchivesPagination();
   }
+}
+
+async function loadMoreArchives() {
+  if (!state.archiveHasMore || state.archiveLoading) return;
+  await loadArchives({ reset: false });
 }
 
 // ── Archive detail / download modal ───────────────────────────────────────────
@@ -1304,7 +1372,7 @@ async function loadTasks() {
     const completedUpload = tasks.find((t) => t.type === "upload" && t.status === "completed" && !t._archivesRefreshed);
     if (completedUpload) {
       completedUpload._archivesRefreshed = true;
-      loadArchives();
+      loadArchives({ reset: true });
     }
   } catch (_) {
     state.taskPollErrorCount += 1;
@@ -1464,7 +1532,7 @@ async function uploadSelectedFiles(files) {
     }
     if (mutableContext && state.selectedArchive) {
       await loadSelectedArchiveContents();
-      await loadArchives();
+      await loadArchives({ reset: true });
     }
   } catch (error) {
     throw error;
@@ -1493,7 +1561,7 @@ async function createEmptyFolder() {
       method: "POST",
       body: JSON.stringify({ name: folderName }),
     });
-    await loadArchives();
+    await loadArchives({ reset: true });
     state.selectedArchive = created;
     state.selectedArchivePath = folderName;
     await loadSelectedArchiveContents();
@@ -1595,7 +1663,7 @@ function setupTransferToast() {
 
 function setupRefresh() {
   const handler = async () => {
-    await loadArchives();
+    await loadArchives({ reset: true });
     await loadTasks();
   };
   $("refreshButton").addEventListener("click", handler);
@@ -1604,7 +1672,7 @@ function setupRefresh() {
     if (state.selectedArchive) {
       await loadSelectedArchiveContents();
     }
-    await loadArchives();
+    await loadArchives({ reset: true });
     await loadTasks();
   });
 }
@@ -1622,6 +1690,12 @@ function setupViewToggle() {
     try { localStorage.setItem("gd_view_mode", mode); } catch (_) { /* ignore */ }
     applyViewMode(mode);
     renderArchives();
+  });
+}
+
+function setupArchivesPagination() {
+  $("loadMoreArchivesButton").addEventListener("click", async () => {
+    await loadMoreArchives();
   });
 }
 
@@ -1856,6 +1930,7 @@ async function init() {
   setupTransferToast();
   setupRefresh();
   setupViewToggle();
+  setupArchivesPagination();
   setupDragAndDrop();
   setupContextMenu();
   setupPreviewBackdrop();
@@ -1880,7 +1955,7 @@ async function init() {
   try {
     showArchiveListView();
     await loadMe();
-    await loadArchives();
+    await loadArchives({ reset: true });
     await loadTasks();
   } catch (error) {
     console.error("init error", error);
