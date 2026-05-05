@@ -154,15 +154,26 @@ def _open_pool():
     min_connections = max(0, int(os.environ.get("GITHUB_DRIVE_DB_MIN_CONNECTIONS", "0")))
     min_connections = min(min_connections, max_connections)
 
+    pool_timeout = max(1.0, float(os.environ.get("GITHUB_DRIVE_DB_POOL_TIMEOUT_SECONDS", "15")))
+    max_lifetime = max(30.0, float(os.environ.get("GITHUB_DRIVE_DB_MAX_LIFETIME_SECONDS", "1800")))
+    max_idle = max(5.0, float(os.environ.get("GITHUB_DRIVE_DB_MAX_IDLE_SECONDS", "300")))
+    reconnect_timeout = max(5.0, float(os.environ.get("GITHUB_DRIVE_DB_RECONNECT_TIMEOUT_SECONDS", "30")))
+
     pool = ConnectionPool(
         normalized_url,
         min_size=min_connections,
         max_size=max_connections,
         kwargs=connect_kwargs,
-        timeout=15,                    # max wait when handing out a pooled connection
+        # Validate pooled connections on checkout so long-idle deployments don't hand out
+        # dead sockets after the database/provider has suspended or rotated them away.
+        check=ConnectionPool.check_connection,
+        timeout=pool_timeout,
+        max_lifetime=max_lifetime,
+        max_idle=max_idle,
+        reconnect_timeout=reconnect_timeout,
         open=False,
     )
-    pool.open(wait=True, timeout=15.0)
+    pool.open(wait=True, timeout=pool_timeout)
     return pool
 
 
@@ -192,19 +203,26 @@ def close_pool() -> None:
 
 @contextmanager
 def connection():
-    pool = get_pool()
-    try:
-        with pool.connection() as conn:
-            yield conn
-    except Exception as exc:
-        if type(exc).__name__ == "PoolTimeout":
-            LOG.warning("Database connection pool exhausted: %s", exc)
-            raise DatabaseUnavailableError(
-                "Database is temporarily busy. Too many requests hit the Postgres pool at once. "
-                "Reduce polling or open tabs, increase GITHUB_DRIVE_DB_MAX_CONNECTIONS, "
-                "increase your Postgres connection limit, or wait a few seconds and retry."
-            ) from exc
-        raise
+    for attempt in (1, 2):
+        pool = get_pool()
+        try:
+            with pool.connection() as conn:
+                yield conn
+                return
+        except Exception as exc:
+            if type(exc).__name__ == "PoolTimeout":
+                LOG.warning("Database connection pool timed out on attempt %s: %s", attempt, exc)
+                if attempt == 1:
+                    LOG.warning("Resetting database pool after timeout and retrying once.")
+                    close_pool()
+                    continue
+                raise DatabaseUnavailableError(
+                    "Database is temporarily unavailable. After long idle periods this can mean "
+                    "the provider paused the database or old pooled connections expired. "
+                    "Retry in a few seconds, increase GITHUB_DRIVE_DB_MAX_CONNECTIONS, or check "
+                    "whether your Postgres provider has gone idle."
+                ) from exc
+            raise
 
 
 def ensure_schema() -> None:
