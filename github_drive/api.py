@@ -20,6 +20,7 @@ ARCHIVE_MARKER = "GITHUB_DRIVE_ARCHIVE="
 MANIFEST_ASSET_NAME = "_manifest.json"
 _CACHE_LOCK = threading.Lock()
 _RELEASES_CACHE: Dict[Tuple[str, str], Dict] = {}
+_RELEASES_PAGE_CACHE: Dict[Tuple[str, int, int], Dict] = {}
 _RELEASE_CACHE: Dict[Tuple[str, int], Dict] = {}
 _RELEASE_TAG_CACHE: Dict[Tuple[str, str], Dict] = {}
 _ASSETS_CACHE: Dict[Tuple[str, int], Dict] = {}
@@ -52,7 +53,7 @@ def decode_archive_body(text: str) -> Optional[Dict]:
 
 class GitHubError(RuntimeError):
     def __init__(self, status: int, message: str, response_body: str = ""):
-        super().__init__(f"GitHub API error {status}: {message}")
+        super().__init__(_format_github_error(status, message, response_body))
         self.status = status
         self.response_body = response_body
 
@@ -203,6 +204,32 @@ class GitHubClient:
             params = None
         _cache_set(_RELEASES_CACHE, (self._cache_namespace, "all"), releases)
         self._index_releases(releases)
+
+    def list_releases_page(self, page: int = 1, per_page: int = 24) -> Tuple[List[Dict], bool]:
+        page = max(1, int(page))
+        per_page = max(1, min(int(per_page), 100))
+        cached = _cache_get(
+            _RELEASES_PAGE_CACHE,
+            (self._cache_namespace, page, per_page),
+            _releases_cache_ttl(),
+        )
+        if cached is not None:
+            return list(cached.get("items") or []), bool(cached.get("has_more"))
+
+        response = self._request(
+            "GET",
+            self._repo_url("/releases"),
+            params={"per_page": per_page, "page": page},
+        )
+        items = response.json()
+        has_more = bool(_parse_next_link(response.headers.get("Link", "")))
+        _cache_set(
+            _RELEASES_PAGE_CACHE,
+            (self._cache_namespace, page, per_page),
+            {"items": items, "has_more": has_more},
+        )
+        self._index_releases(items)
+        return items, has_more
 
     def get_release_by_tag(self, tag: str) -> Optional[Dict]:
         cached = _cache_get(_RELEASE_TAG_CACHE, (self._cache_namespace, tag), _release_cache_ttl())
@@ -430,6 +457,8 @@ class GitHubClient:
     def _invalidate_repo_metadata_cache(self) -> None:
         with _CACHE_LOCK:
             _RELEASES_CACHE.pop((self._cache_namespace, "all"), None)
+            for key in [key for key in _RELEASES_PAGE_CACHE if key[0] == self._cache_namespace]:
+                _RELEASES_PAGE_CACHE.pop(key, None)
             for key in [key for key in _RELEASE_CACHE if key[0] == self._cache_namespace]:
                 _RELEASE_CACHE.pop(key, None)
             for key in [key for key in _RELEASE_TAG_CACHE if key[0] == self._cache_namespace]:
@@ -518,6 +547,36 @@ def list_drive_archives(client: GitHubClient) -> List[Dict]:
     return archives
 
 
+def list_drive_archives_page(
+    client: GitHubClient,
+    page: int = 1,
+    per_page: int = 24,
+) -> Tuple[List[Dict], bool]:
+    releases, has_more = client.list_releases_page(page=page, per_page=per_page)
+    archives: List[Dict] = []
+    for release in releases:
+        meta = decode_archive_body(release.get("body") or "")
+        if not meta:
+            continue
+        archives.append(
+            {
+                "release_id": release["id"],
+                "tag": release.get("tag_name", ""),
+                "name": release.get("name") or release.get("tag_name") or "",
+                "html_url": release.get("html_url"),
+                "draft": release.get("draft", False),
+                "prerelease": release.get("prerelease", False),
+                "asset_count": len(release.get("assets") or []),
+                "total_asset_bytes": sum(int(asset.get("size") or 0) for asset in (release.get("assets") or [])),
+                "created_at": release.get("created_at", ""),
+                "updated_at": release.get("updated_at", ""),
+                "archive": meta,
+            }
+        )
+    archives.sort(key=lambda item: item["archive"].get("created_at") or item["created_at"] or "", reverse=True)
+    return archives, has_more
+
+
 def _cache_get(bucket: Dict, key: Tuple, ttl: float):
     if ttl <= 0:
         return None
@@ -595,3 +654,40 @@ def _asset_bytes_cache_max_bytes() -> int:
 
 def archive_tag_for(archive_id: str) -> str:
     return f"{ARCHIVE_TAG_PREFIX}{archive_id.lower()}"
+
+
+def _format_github_error(status: int, message: str, response_body: str = "") -> str:
+    details: List[str] = []
+    parsed = _parse_github_error_body(response_body)
+    if parsed:
+        api_message = (parsed.get("message") or "").strip()
+        if api_message and api_message.lower() != str(message or "").strip().lower():
+            details.append(api_message)
+        for item in parsed.get("errors") or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip()
+            field = str(item.get("field") or "").strip()
+            resource = str(item.get("resource") or "").strip()
+            entry_message = str(item.get("message") or "").strip()
+            parts = [part for part in [resource, field, code] if part]
+            summary = ".".join(parts)
+            if entry_message and summary:
+                details.append(f"{summary}: {entry_message}")
+            elif entry_message:
+                details.append(entry_message)
+            elif summary:
+                details.append(summary)
+    if details:
+        return f"GitHub API error {status}: {'; '.join(details[:3])}"
+    return f"GitHub API error {status}: {message}"
+
+
+def _parse_github_error_body(response_body: str) -> Optional[Dict]:
+    if not response_body:
+        return None
+    try:
+        payload = json.loads(response_body)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None

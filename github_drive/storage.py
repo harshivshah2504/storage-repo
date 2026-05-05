@@ -24,6 +24,7 @@ from .api import (
     decode_archive_body,
     encode_archive_body,
     list_drive_archives,
+    list_drive_archives_page,
     now_utc_iso,
 )
 from .auth_manager import get_client
@@ -130,6 +131,14 @@ def collect_file_entries(source_path: str, recursive: bool = True) -> List[Dict]
 
 def list_remote_archives(client: Optional[GitHubClient] = None) -> List[Dict]:
     return list_drive_archives(client or get_client())
+
+
+def list_remote_archives_page(
+    page: int = 1,
+    per_page: int = 24,
+    client: Optional[GitHubClient] = None,
+) -> Tuple[List[Dict], bool]:
+    return list_drive_archives_page(client or get_client(), page=page, per_page=per_page)
 
 
 def list_archive_contents(
@@ -246,7 +255,8 @@ def delete_archive_file(
     existing_manifest = by_name.get(MANIFEST_ASSET_NAME)
     if existing_manifest:
         client.delete_asset(existing_manifest["id"])
-    client.upload_asset_bytes(
+    _upload_release_asset_bytes_idempotent(
+        client=client,
         release_id=release["id"],
         asset_name=MANIFEST_ASSET_NAME,
         payload=json.dumps(_manifest_payload_from_items(archive_meta, remaining_items, encrypted, storage_mode), indent=2).encode("utf-8"),
@@ -273,7 +283,8 @@ def delete_archive_file(
             from . import thumbnails
             cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
             if cover_bytes:
-                client.upload_asset_bytes(
+                _upload_release_asset_bytes_idempotent(
+                    client=client,
                     release_id=release["id"],
                     asset_name=COVER_ASSET_NAME,
                     payload=cover_bytes,
@@ -380,11 +391,16 @@ def create_empty_archive(
         resume_archive_id=None,
     )
     manifest_payload = _manifest_payload_from_items(archive_meta, [], False, STORAGE_MODE_FILE_ASSETS)
-    client.upload_asset_bytes(
-        release_id=release["id"],
-        asset_name=MANIFEST_ASSET_NAME,
-        payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
-        content_type="application/json",
+    _retry(
+        "upload empty archive manifest",
+        retries,
+        lambda: _upload_release_asset_bytes_idempotent(
+            client=client,
+            release_id=release["id"],
+            asset_name=MANIFEST_ASSET_NAME,
+            payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
+            content_type="application/json",
+        ),
     )
     emit_progress(
         progress,
@@ -538,7 +554,8 @@ def append_to_archive(
             client.delete_asset(existing_manifest["id"])
         except Exception:
             pass
-    client.upload_asset_bytes(
+    _upload_release_asset_bytes_idempotent(
+        client=client,
         release_id=release["id"],
         asset_name=MANIFEST_ASSET_NAME,
         payload=json.dumps(_manifest_payload_from_items(archive_meta, all_items, encrypt, storage_mode), indent=2).encode("utf-8"),
@@ -564,7 +581,8 @@ def append_to_archive(
             )
             cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
             if cover_bytes:
-                client.upload_asset_bytes(
+                _upload_release_asset_bytes_idempotent(
+                    client=client,
                     release_id=release["id"],
                     asset_name=COVER_ASSET_NAME,
                     payload=cover_bytes,
@@ -676,7 +694,8 @@ def upload_archive(
         cover_bytes = thumbnails.make_cover_jpeg(cover_candidate["source_path"])
         if cover_bytes:
             try:
-                client.upload_asset_bytes(
+                _upload_release_asset_bytes_idempotent(
+                    client=client,
                     release_id=release_id,
                     asset_name=thumbnails.COVER_ASSET_NAME,
                     payload=cover_bytes,
@@ -807,7 +826,8 @@ def upload_archive(
     _retry(
         "upload manifest",
         retries,
-        lambda: client.upload_asset_bytes(
+        lambda: _upload_release_asset_bytes_idempotent(
+            client=client,
             release_id=release_id,
             asset_name=MANIFEST_ASSET_NAME,
             payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
@@ -920,7 +940,8 @@ def _upload_entry(
                 asset = _retry(
                     f"upload {relative_path} part {chunk_index + 1}/{len(plan)}",
                     retries,
-                    lambda path=upload_path, name=asset_name: client.upload_asset(
+                    lambda path=upload_path, name=asset_name: _upload_release_asset_file_idempotent(
+                        client=client,
                         release_id=release_id,
                         asset_name=name,
                         file_path=path,
@@ -1131,15 +1152,106 @@ def _prepare_upload_release(
     release = _retry(
         "create release",
         retries,
-        lambda: client.create_release(
-            tag=archive_tag_for(archive_id),
+        lambda: _create_release_idempotent(
+            client=client,
+            archive_id=archive_id,
+            title=title,
+            body=body,
+            private_release=private_release,
+        ),
+    )
+    return release, archive_meta
+
+
+def _create_release_idempotent(
+    client: GitHubClient,
+    archive_id: str,
+    title: str,
+    body: str,
+    private_release: bool,
+) -> Dict:
+    tag = archive_tag_for(archive_id)
+    try:
+        return client.create_release(
+            tag=tag,
             name=title,
             body=body,
             draft=False,
             prerelease=bool(private_release),
-        ),
-    )
-    return release, archive_meta
+        )
+    except GitHubError as exc:
+        if _github_error_is_already_exists(exc, field="tag_name"):
+            existing = client.get_release_by_tag(tag)
+            if existing and decode_archive_body(existing.get("body") or ""):
+                return existing
+        raise
+
+
+def _upload_release_asset_file_idempotent(
+    client: GitHubClient,
+    release_id: int,
+    asset_name: str,
+    file_path: str,
+    content_type: str,
+) -> Dict:
+    try:
+        return client.upload_asset(
+            release_id=release_id,
+            asset_name=asset_name,
+            file_path=file_path,
+            content_type=content_type,
+        )
+    except GitHubError as exc:
+        if _github_error_is_already_exists(exc, field="name"):
+            asset = _find_release_asset_by_name(client, release_id, asset_name)
+            if asset:
+                return asset
+        raise
+
+
+def _upload_release_asset_bytes_idempotent(
+    client: GitHubClient,
+    release_id: int,
+    asset_name: str,
+    payload: bytes,
+    content_type: str,
+) -> Dict:
+    try:
+        return client.upload_asset_bytes(
+            release_id=release_id,
+            asset_name=asset_name,
+            payload=payload,
+            content_type=content_type,
+        )
+    except GitHubError as exc:
+        if _github_error_is_already_exists(exc, field="name"):
+            asset = _find_release_asset_by_name(client, release_id, asset_name)
+            if asset:
+                return asset
+        raise
+
+
+def _find_release_asset_by_name(client: GitHubClient, release_id: int, asset_name: str) -> Optional[Dict]:
+    assets = client.list_release_assets(release_id)
+    return next((asset for asset in assets if asset.get("name") == asset_name), None)
+
+
+def _github_error_is_already_exists(exc: Exception, field: Optional[str] = None) -> bool:
+    if not isinstance(exc, GitHubError) or exc.status != 422:
+        return False
+    try:
+        payload = json.loads(exc.response_body or "")
+    except json.JSONDecodeError:
+        return False
+    for item in payload.get("errors") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("code") or "").strip() != "already_exists":
+            continue
+        if field and str(item.get("field") or "").strip() != field:
+            continue
+        return True
+    return False
 
 
 def _plan_entry_assets(order: int, entry: Dict, encrypt: bool) -> List[Dict]:

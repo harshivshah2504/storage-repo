@@ -45,6 +45,7 @@ from .storage import (
     download_archive,
     list_archive_contents,
     list_remote_archives,
+    list_remote_archives_page,
     read_archive_file,
     upload_archive,
 )
@@ -505,12 +506,21 @@ def create_app() -> Flask:
     def archives():
         try:
             client = _user_client(g.user_id)
-            result = list_remote_archives(client=client)
+            page = max(1, int(request.args.get("page", "1") or "1"))
+            per_page = _archives_page_size(request.args.get("per_page"))
+            result, has_more = list_remote_archives_page(page=page, per_page=per_page, client=client)
         except RuntimeError as exc:
             return _credential_error_response(exc)
+        except ValueError:
+            return jsonify({"error": "page and per_page must be integers."}), 400
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
-        return jsonify({"archives": result})
+        return jsonify({
+            "archives": result,
+            "page": page,
+            "per_page": per_page,
+            "has_more": has_more,
+        })
 
     @app.get("/api/archives/<int:release_id>/cover")
     @login_required
@@ -1747,6 +1757,15 @@ def _normalize_virtual_path(path: str) -> str:
 def _safe_download_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "-", str(value or "").strip()).strip(" .")
     return cleaned or "download"
+
+
+def _archives_page_size(raw_value: Optional[str] = None) -> int:
+    configured = env_int("GITHUB_DRIVE_ARCHIVES_PAGE_SIZE", 24)
+    configured = max(1, min(configured, 100))
+    if raw_value is None or str(raw_value).strip() == "":
+        return configured
+    value = int(str(raw_value).strip())
+    return max(1, min(value, 100))
 
 
 def _storage_limit_bytes() -> Optional[int]:
