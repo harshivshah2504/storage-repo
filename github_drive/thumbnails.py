@@ -1,12 +1,16 @@
 """Cover-thumbnail generation and content-type classification for archive entries.
 
 The generated cover is uploaded as a release asset named `_cover.jpg`. It is best-effort —
-if Pillow can't decode the source image (HEIC/RAW without plugins, corrupt files, etc.),
-we silently fall back to no cover. The frontend handles a missing cover by showing the
-generic archive icon.
+if the runtime can't decode the source media (HEIC/RAW without plugins, corrupt files,
+missing ffmpeg for videos, etc.), we silently fall back to no cover. The frontend handles
+a missing cover by showing the generic archive icon.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -50,6 +54,14 @@ def first_image_entry(entries: List[Dict]) -> Optional[Dict]:
     return None
 
 
+def first_visual_entry(entries: List[Dict]) -> Optional[Dict]:
+    for entry in entries:
+        ext = Path(entry["relative_path"]).suffix.lower()
+        if ext in IMAGE_EXTENSIONS or ext in VIDEO_EXTENSIONS:
+            return entry
+    return None
+
+
 def first_image_asset(assets: List[Dict]) -> Optional[Dict]:
     for asset in assets:
         name = asset.get("name") or ""
@@ -61,6 +73,17 @@ def first_image_asset(assets: List[Dict]) -> Optional[Dict]:
     return None
 
 
+def first_visual_asset(assets: List[Dict]) -> Optional[Dict]:
+    for asset in assets:
+        name = asset.get("name") or ""
+        if name == COVER_ASSET_NAME or name == "_manifest.json":
+            continue
+        ext = Path(name).suffix.lower()
+        if ext in IMAGE_EXTENSIONS or ext in VIDEO_EXTENSIONS:
+            return asset
+    return None
+
+
 def make_cover_jpeg(src_path: str, size: int = 480) -> Optional[bytes]:
     """Center-crop and resize `src_path` into a square JPEG. Returns None on failure."""
     try:
@@ -68,6 +91,73 @@ def make_cover_jpeg(src_path: str, size: int = 480) -> Optional[bytes]:
             return make_cover_jpeg_from_bytes(handle.read(), size=size)
     except Exception:
         return None
+
+
+def make_video_cover_jpeg(src_path: str, size: int = 480, seek_seconds: float = 0.5) -> Optional[bytes]:
+    ffmpeg = _ffmpeg_executable()
+    if not ffmpeg:
+        return None
+    temp_dir = tempfile.mkdtemp(prefix="github-drive-video-cover-")
+    frame_path = os.path.join(temp_dir, "frame.jpg")
+    try:
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-ss", str(max(0.0, seek_seconds)),
+            "-i", src_path,
+            "-frames:v", "1",
+            "-vf", f"thumbnail,scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}",
+            frame_path,
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(frame_path, "rb") as handle:
+            return handle.read()
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def make_cover_for_path(src_path: str, size: int = 480) -> Optional[bytes]:
+    ext = Path(src_path).suffix.lower()
+    if ext in IMAGE_EXTENSIONS:
+        return make_cover_jpeg(src_path, size=size)
+    if ext in VIDEO_EXTENSIONS:
+        return make_video_cover_jpeg(src_path, size=size)
+    return None
+
+
+def make_cover_from_bytes(payload: bytes, suffix: str = "", size: int = 480) -> Optional[bytes]:
+    ext = (suffix or "").lower()
+    if ext in VIDEO_EXTENSIONS:
+        temp_dir = tempfile.mkdtemp(prefix="github-drive-video-cover-bytes-")
+        temp_path = os.path.join(temp_dir, f"source{ext or '.bin'}")
+        try:
+            with open(temp_path, "wb") as handle:
+                handle.write(payload)
+            return make_video_cover_jpeg(temp_path, size=size)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    return make_cover_jpeg_from_bytes(payload, size=size)
+
+
+def preview_thumb_supported(ext: str) -> bool:
+    ext = ext.lower()
+    return ext in IMAGE_EXTENSIONS or ext in VIDEO_EXTENSIONS
+
+
+def _ffmpeg_executable() -> Optional[str]:
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe:
+            return exe
+    except Exception:
+        pass
+    return shutil.which("ffmpeg")
 
 
 def make_cover_jpeg_from_bytes(payload: bytes, size: int = 480) -> Optional[bytes]:

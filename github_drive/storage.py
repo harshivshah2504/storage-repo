@@ -243,7 +243,7 @@ def delete_archive_file(
         remaining_paths,
     )
     archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(
-        _is_image_path(path) for path in remaining_paths
+        _is_visual_path(path) for path in remaining_paths
     ) else None
 
     client.update_release(
@@ -269,19 +269,22 @@ def delete_archive_file(
             client.delete_asset(existing_cover["id"])
         except Exception:
             pass
-    next_image = next((item for item in remaining_items if _is_image_path(item.get("relative_path") or "")), None)
-    if next_image:
+    next_visual = next((item for item in remaining_items if _is_visual_path(item.get("relative_path") or "")), None)
+    if next_visual:
         try:
-            image_bytes, _content_type = _read_archive_entry_bytes(
+            media_bytes, _content_type = _read_archive_entry_bytes(
                 client=client,
-                item=next_image,
-                relative_path=next_image["relative_path"],
+                item=next_visual,
+                relative_path=next_visual["relative_path"],
                 member=None,
                 encrypted=encrypted,
                 encode_key=encode_key,
             )
             from . import thumbnails
-            cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
+            cover_bytes = thumbnails.make_cover_from_bytes(
+                media_bytes,
+                suffix=Path(next_visual["relative_path"]).suffix.lower(),
+            )
             if cover_bytes:
                 _upload_release_asset_bytes_idempotent(
                     client=client,
@@ -540,7 +543,7 @@ def append_to_archive(
         for relative_path in relative_paths
     ])
     archive_meta["virtual_folders"] = virtual_folders
-    archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(_is_image_path(path) for path in relative_paths) else None
+    archive_meta["cover_asset_name"] = COVER_ASSET_NAME if any(_is_visual_path(path) for path in relative_paths) else None
 
     client.update_release(
         release["id"],
@@ -568,18 +571,21 @@ def append_to_archive(
             client.delete_asset(current_cover["id"])
         except Exception:
             pass
-    next_image = next((item for item in all_items if _is_image_path(item.get("relative_path") or "")), None)
-    if next_image:
+    next_visual = next((item for item in all_items if _is_visual_path(item.get("relative_path") or "")), None)
+    if next_visual:
         try:
-            image_bytes, _content_type = _read_archive_entry_bytes(
+            media_bytes, _content_type = _read_archive_entry_bytes(
                 client=client,
-                item=next_image,
-                relative_path=next_image["relative_path"],
+                item=next_visual,
+                relative_path=next_visual["relative_path"],
                 member=None,
                 encrypted=encrypt,
                 encode_key=encode_key,
             )
-            cover_bytes = thumbnails.make_cover_jpeg_from_bytes(image_bytes)
+            cover_bytes = thumbnails.make_cover_from_bytes(
+                media_bytes,
+                suffix=Path(next_visual["relative_path"]).suffix.lower(),
+            )
             if cover_bytes:
                 _upload_release_asset_bytes_idempotent(
                     client=client,
@@ -641,7 +647,7 @@ def upload_archive(
 
     from . import thumbnails
     kinds = thumbnails.classify_entries(entries)
-    cover_candidate = thumbnails.first_image_entry(entries)
+    cover_candidate = thumbnails.first_visual_entry(entries)
 
     created_at = now_utc_iso()
     archive_meta = {
@@ -691,7 +697,7 @@ def upload_archive(
     # Best-effort cover thumbnail. Failures are non-fatal — listing without _cover.jpg
     # falls back to the generic icon on the frontend.
     if cover_candidate and thumbnails.COVER_ASSET_NAME not in existing_assets:
-        cover_bytes = thumbnails.make_cover_jpeg(cover_candidate["source_path"])
+        cover_bytes = thumbnails.make_cover_for_path(cover_candidate["source_path"])
         if cover_bytes:
             try:
                 _upload_release_asset_bytes_idempotent(
@@ -1811,7 +1817,7 @@ def _flatten_archive_entries(items: List[Dict], storage_mode: str, archive_meta:
                         "original_size": int(member.get("original_size") or 0),
                         "content_type": member.get("content_type") or "application/octet-stream",
                         "kind": thumbnails.classify_extension(ext),
-                        "previewable": ext in thumbnails.IMAGE_EXTENSIONS,
+                        "previewable": thumbnails.preview_thumb_supported(ext),
                     }
                 )
     else:
@@ -1824,7 +1830,7 @@ def _flatten_archive_entries(items: List[Dict], storage_mode: str, archive_meta:
                     "original_size": int(item.get("original_size") or 0),
                     "content_type": item.get("content_type") or "application/octet-stream",
                     "kind": thumbnails.classify_extension(ext),
-                    "previewable": ext in thumbnails.IMAGE_EXTENSIONS,
+                    "previewable": thumbnails.preview_thumb_supported(ext),
                 }
             )
     for folder_path in _normalize_virtual_folders((archive_meta or {}).get("virtual_folders"), [entry["relative_path"] for entry in entries]):
@@ -1938,6 +1944,13 @@ def _is_image_path(relative_path: str) -> bool:
     from . import thumbnails
 
     return Path(relative_path).suffix.lower() in thumbnails.IMAGE_EXTENSIONS
+
+
+def _is_visual_path(relative_path: str) -> bool:
+    from . import thumbnails
+
+    ext = Path(relative_path).suffix.lower()
+    return ext in thumbnails.IMAGE_EXTENSIONS or ext in thumbnails.VIDEO_EXTENSIONS
 
 
 def _normalize_folder_path(path: str) -> str:

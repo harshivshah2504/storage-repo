@@ -533,12 +533,15 @@ def create_app() -> Flask:
             abort(404)
         cover = next((a for a in assets if a["name"] == thumbnails.COVER_ASSET_NAME), None)
         if not cover:
-            legacy_image = thumbnails.first_image_asset(assets)
-            if not legacy_image:
+            legacy_visual = thumbnails.first_visual_asset(assets)
+            if not legacy_visual:
                 abort(404)
             try:
-                original = client.download_asset_bytes(legacy_image["id"])
-                data = thumbnails.make_cover_jpeg_from_bytes(original)
+                original = client.download_asset_bytes(legacy_visual["id"])
+                data = thumbnails.make_cover_from_bytes(
+                    original,
+                    suffix=Path(legacy_visual.get("name") or "").suffix.lower(),
+                )
             except Exception:
                 abort(404)
             if not data:
@@ -652,7 +655,10 @@ def create_app() -> Flask:
                 client=client,
             )
             if thumb:
-                thumb_bytes = thumbnails.make_cover_jpeg_from_bytes(payload)
+                thumb_bytes = thumbnails.make_cover_from_bytes(
+                    payload,
+                    suffix=Path(relative_path).suffix.lower(),
+                )
                 if not thumb_bytes:
                     abort(404)
                 return Response(
