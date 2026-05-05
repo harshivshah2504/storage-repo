@@ -1384,6 +1384,12 @@ input, select {
 
 .auth-card form { display: grid; gap: 16px; }
 
+.auth-oauth-form {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
 .auth-card .auth-error {
   background: rgba(217, 48, 37, 0.08);
   color: var(--color-danger);
@@ -1397,7 +1403,6 @@ input, select {
   width: 100%;
   justify-content: center;
   text-decoration: none;
-  margin-bottom: 16px;
 }
 
 .auth-divider {
@@ -1422,6 +1427,25 @@ input, select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.auth-footer-single {
+  justify-content: flex-start;
+}
+
+.auth-turnstile {
+  min-height: 66px;
+}
+
+.auth-turnstile .cf-turnstile {
+  width: 100%;
+}
+
+.auth-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 /* ── Utilities ─────────────────────────────────────────────────────── */

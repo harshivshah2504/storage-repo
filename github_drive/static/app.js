@@ -1183,7 +1183,7 @@ function openArchiveDetail(archive) {
 async function startDownload() {
   const archive = state.selectedArchive;
   if (!archive) return;
-  const workers = Number($("downloadWorkers").value || 4);
+  const workers = Number($("downloadWorkers").value || 2);
   showTransferToast();
   try {
     const result = await fetchJson("/api/download", {
