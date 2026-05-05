@@ -1473,24 +1473,49 @@ async function uploadFileGroup(group, uploadForm) {
   return payload;
 }
 
-async function uploadFileGroups(groups, uploadForm) {
-  const results = new Array(groups.length);
-  let nextIndex = 0;
-  const concurrency = Math.min(3, groups.length);
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
-  async function worker() {
-    while (nextIndex < groups.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      try {
-        results[index] = { status: "fulfilled", value: await uploadFileGroup(groups[index], uploadForm) };
-      } catch (error) {
-        results[index] = { status: "rejected", reason: error };
+async function waitForUploadTask(taskId) {
+  while (true) {
+    await sleep(1500);
+    let task;
+    try {
+      task = await fetchJson(`/api/tasks/${taskId}`);
+    } catch (error) {
+      if (error.status === 404) {
+        continue;
       }
+      throw error;
+    }
+    try {
+      await loadTasks();
+    } catch (_) {
+      // Best-effort UI refresh while the dedicated wait loop continues.
+    }
+    if (task.status === "completed") {
+      return task;
+    }
+    if (task.status === "failed") {
+      throw new Error(task.error || "Upload failed");
     }
   }
+}
 
-  await Promise.all(Array.from({ length: concurrency }, worker));
+async function uploadFileGroups(groups, uploadForm) {
+  const results = new Array(groups.length);
+  // Submit one archive at a time and wait for completion before starting the next.
+  // This keeps independent uploads independent while respecting the free-tier task/memory limits.
+  for (let index = 0; index < groups.length; index += 1) {
+    try {
+      const queued = await uploadFileGroup(groups[index], uploadForm);
+      const task = await waitForUploadTask(queued.task_id);
+      results[index] = { status: "fulfilled", value: task };
+    } catch (error) {
+      results[index] = { status: "rejected", reason: error };
+    }
+  }
   return results;
 }
 
