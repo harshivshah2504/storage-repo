@@ -1,8 +1,11 @@
 import json
 import os
 import random
+import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
@@ -15,6 +18,13 @@ STORAGE_FORMAT = "github-drive-archive"
 METADATA_VERSION = 1
 ARCHIVE_MARKER = "GITHUB_DRIVE_ARCHIVE="
 MANIFEST_ASSET_NAME = "_manifest.json"
+_CACHE_LOCK = threading.Lock()
+_RELEASES_CACHE: Dict[Tuple[str, str], Dict] = {}
+_RELEASE_CACHE: Dict[Tuple[str, int], Dict] = {}
+_RELEASE_TAG_CACHE: Dict[Tuple[str, str], Dict] = {}
+_ASSETS_CACHE: Dict[Tuple[str, int], Dict] = {}
+_ASSET_BYTES_CACHE: Dict[Tuple[str, int], Dict] = {}
+_ASSET_TO_RELEASE: Dict[Tuple[str, int], int] = {}
 
 
 def now_utc_iso() -> str:
@@ -61,6 +71,7 @@ class GitHubClient:
         self.timeout = timeout
         self._session = requests.Session()
         self._session.headers.update(self._default_headers())
+        self._cache_namespace = f"{sha256(self.token.encode('utf-8')).hexdigest()[:16]}:{self.owner}/{self.repo}"
 
     def _default_headers(self) -> Dict[str, str]:
         return {
@@ -169,11 +180,20 @@ class GitHubClient:
         return self._request("GET", f"{GITHUB_API_BASE}/user").json()["login"]
 
     def list_releases(self) -> Iterator[Dict]:
+        cached = _cache_get(_RELEASES_CACHE, (self._cache_namespace, "all"), _releases_cache_ttl())
+        if cached is not None:
+            for item in cached:
+                yield item
+            return
+
         url = self._repo_url("/releases")
         params = {"per_page": 100}
+        releases: List[Dict] = []
         while True:
             response = self._request("GET", url, params=params)
-            for item in response.json():
+            page_items = response.json()
+            releases.extend(page_items)
+            for item in page_items:
                 yield item
             link = response.headers.get("Link", "")
             next_url = _parse_next_link(link)
@@ -181,17 +201,49 @@ class GitHubClient:
                 break
             url = next_url
             params = None
+        _cache_set(_RELEASES_CACHE, (self._cache_namespace, "all"), releases)
+        self._index_releases(releases)
 
     def get_release_by_tag(self, tag: str) -> Optional[Dict]:
+        cached = _cache_get(_RELEASE_TAG_CACHE, (self._cache_namespace, tag), _release_cache_ttl())
+        if cached is not None:
+            return cached
+        releases = _cache_get(_RELEASES_CACHE, (self._cache_namespace, "all"), _releases_cache_ttl())
+        if releases is not None:
+            for release in releases:
+                if (release.get("tag_name") or "") == tag:
+                    _cache_set(_RELEASE_TAG_CACHE, (self._cache_namespace, tag), release)
+                    _cache_set(_RELEASE_CACHE, (self._cache_namespace, int(release["id"])), release)
+                    return release
         try:
-            return self._request("GET", self._repo_url(f"/releases/tags/{tag}")).json()
+            release = self._request("GET", self._repo_url(f"/releases/tags/{tag}")).json()
         except GitHubError as exc:
             if exc.status == 404:
                 return None
             raise
+        _cache_set(_RELEASE_TAG_CACHE, (self._cache_namespace, tag), release)
+        _cache_set(_RELEASE_CACHE, (self._cache_namespace, int(release["id"])), release)
+        return release
 
     def get_release(self, release_id: int) -> Dict:
-        return self._request("GET", self._repo_url(f"/releases/{release_id}")).json()
+        cached = _cache_get(_RELEASE_CACHE, (self._cache_namespace, int(release_id)), _release_cache_ttl())
+        if cached is not None:
+            return cached
+        releases = _cache_get(_RELEASES_CACHE, (self._cache_namespace, "all"), _releases_cache_ttl())
+        if releases is not None:
+            for release in releases:
+                if int(release.get("id") or 0) == int(release_id):
+                    _cache_set(_RELEASE_CACHE, (self._cache_namespace, int(release_id)), release)
+                    tag_name = (release.get("tag_name") or "").strip()
+                    if tag_name:
+                        _cache_set(_RELEASE_TAG_CACHE, (self._cache_namespace, tag_name), release)
+                    return release
+        release = self._request("GET", self._repo_url(f"/releases/{release_id}")).json()
+        _cache_set(_RELEASE_CACHE, (self._cache_namespace, int(release_id)), release)
+        tag_name = (release.get("tag_name") or "").strip()
+        if tag_name:
+            _cache_set(_RELEASE_TAG_CACHE, (self._cache_namespace, tag_name), release)
+        return release
 
     def create_release(
         self,
@@ -211,13 +263,21 @@ class GitHubClient:
         }
         if target_commitish:
             payload["target_commitish"] = target_commitish
-        return self._request("POST", self._repo_url("/releases"), json=payload).json()
+        created = self._request("POST", self._repo_url("/releases"), json=payload).json()
+        self._invalidate_repo_metadata_cache()
+        self._invalidate_release_assets_cache(int(created["id"]))
+        return created
 
     def update_release(self, release_id: int, **fields) -> Dict:
-        return self._request("PATCH", self._repo_url(f"/releases/{release_id}"), json=fields).json()
+        updated = self._request("PATCH", self._repo_url(f"/releases/{release_id}"), json=fields).json()
+        self._invalidate_repo_metadata_cache()
+        self._invalidate_release_assets_cache(int(release_id))
+        return updated
 
     def delete_release(self, release_id: int) -> None:
         self._request("DELETE", self._repo_url(f"/releases/{release_id}"))
+        self._invalidate_release_assets_cache(int(release_id))
+        self._invalidate_repo_metadata_cache()
 
     def delete_tag(self, tag: str) -> None:
         try:
@@ -225,8 +285,13 @@ class GitHubClient:
         except GitHubError as exc:
             if exc.status != 404:
                 raise
+        self._invalidate_repo_metadata_cache()
 
     def list_release_assets(self, release_id: int) -> List[Dict]:
+        release_id = int(release_id)
+        cached = _cache_get(_ASSETS_CACHE, (self._cache_namespace, release_id), _assets_cache_ttl())
+        if cached is not None:
+            return cached
         assets: List[Dict] = []
         url = self._repo_url(f"/releases/{release_id}/assets")
         params = {"per_page": 100}
@@ -238,6 +303,10 @@ class GitHubClient:
                 break
             url = next_url
             params = None
+        _cache_set(_ASSETS_CACHE, (self._cache_namespace, release_id), assets)
+        with _CACHE_LOCK:
+            for asset in assets:
+                _ASSET_TO_RELEASE[(self._cache_namespace, int(asset["id"]))] = release_id
         return assets
 
     def upload_asset(
@@ -268,7 +337,12 @@ class GitHubClient:
                 )
 
         response = self._request_with_retries(f"upload asset {asset_name}", send)
-        return response.json()
+        uploaded = response.json()
+        with _CACHE_LOCK:
+            _ASSET_TO_RELEASE[(self._cache_namespace, int(uploaded["id"]))] = int(release_id)
+        self._invalidate_release_assets_cache(int(release_id))
+        self._invalidate_repo_metadata_cache()
+        return uploaded
 
     def upload_asset_bytes(
         self,
@@ -291,10 +365,22 @@ class GitHubClient:
                 timeout=max(self.timeout, 600),
             ),
         )
-        return response.json()
+        uploaded = response.json()
+        with _CACHE_LOCK:
+            _ASSET_TO_RELEASE[(self._cache_namespace, int(uploaded["id"]))] = int(release_id)
+        self._invalidate_release_assets_cache(int(release_id))
+        self._invalidate_repo_metadata_cache()
+        return uploaded
 
     def delete_asset(self, asset_id: int) -> None:
         self._request("DELETE", self._repo_url(f"/releases/assets/{asset_id}"))
+        release_id = None
+        with _CACHE_LOCK:
+            release_id = _ASSET_TO_RELEASE.pop((self._cache_namespace, int(asset_id)), None)
+            _ASSET_BYTES_CACHE.pop((self._cache_namespace, int(asset_id)), None)
+        if release_id is not None:
+            self._invalidate_release_assets_cache(int(release_id))
+            self._invalidate_repo_metadata_cache()
 
     def download_asset(self, asset_id: int, output_path: str, chunk_size: int = 1024 * 1024) -> None:
         url = self._repo_url(f"/releases/assets/{asset_id}")
@@ -318,7 +404,12 @@ class GitHubClient:
                     if chunk:
                         handle.write(chunk)
 
-    def download_asset_bytes(self, asset_id: int) -> bytes:
+    def download_asset_bytes(self, asset_id: int, use_cache: bool = False) -> bytes:
+        asset_id = int(asset_id)
+        if use_cache:
+            cached = _cache_get(_ASSET_BYTES_CACHE, (self._cache_namespace, asset_id), _asset_bytes_cache_ttl())
+            if cached is not None:
+                return cached
         url = self._repo_url(f"/releases/assets/{asset_id}")
         headers = dict(self._default_headers())
         headers["Accept"] = "application/octet-stream"
@@ -331,7 +422,48 @@ class GitHubClient:
                 timeout=max(self.timeout, 600),
             ),
         )
-        return response.content
+        payload = response.content
+        if use_cache and len(payload) <= _asset_bytes_cache_max_bytes():
+            _cache_set(_ASSET_BYTES_CACHE, (self._cache_namespace, asset_id), payload)
+        return payload
+
+    def _invalidate_repo_metadata_cache(self) -> None:
+        with _CACHE_LOCK:
+            _RELEASES_CACHE.pop((self._cache_namespace, "all"), None)
+            for key in [key for key in _RELEASE_CACHE if key[0] == self._cache_namespace]:
+                _RELEASE_CACHE.pop(key, None)
+            for key in [key for key in _RELEASE_TAG_CACHE if key[0] == self._cache_namespace]:
+                _RELEASE_TAG_CACHE.pop(key, None)
+
+    def _invalidate_release_assets_cache(self, release_id: int) -> None:
+        release_id = int(release_id)
+        with _CACHE_LOCK:
+            _ASSETS_CACHE.pop((self._cache_namespace, release_id), None)
+            asset_keys = [
+                key for key, value in _ASSET_TO_RELEASE.items()
+                if key[0] == self._cache_namespace and int(value) == release_id
+            ]
+            for namespace_key in asset_keys:
+                _ASSET_TO_RELEASE.pop(namespace_key, None)
+                _ASSET_BYTES_CACHE.pop(namespace_key, None)
+
+    def _index_releases(self, releases: List[Dict]) -> None:
+        ttl = _release_cache_ttl()
+        if ttl <= 0:
+            return
+        with _CACHE_LOCK:
+            for release in releases:
+                release_id = int(release["id"])
+                _RELEASE_CACHE[(self._cache_namespace, release_id)] = {
+                    "expires_at": time.time() + ttl,
+                    "value": deepcopy(release),
+                }
+                tag_name = (release.get("tag_name") or "").strip()
+                if tag_name:
+                    _RELEASE_TAG_CACHE[(self._cache_namespace, tag_name)] = {
+                        "expires_at": time.time() + ttl,
+                        "value": deepcopy(release),
+                    }
 
 
 def _parse_next_link(link_header: str) -> Optional[str]:
@@ -376,6 +508,7 @@ def list_drive_archives(client: GitHubClient) -> List[Dict]:
                 "draft": release.get("draft", False),
                 "prerelease": release.get("prerelease", False),
                 "asset_count": len(release.get("assets") or []),
+                "total_asset_bytes": sum(int(asset.get("size") or 0) for asset in (release.get("assets") or [])),
                 "created_at": release.get("created_at", ""),
                 "updated_at": release.get("updated_at", ""),
                 "archive": meta,
@@ -383,6 +516,81 @@ def list_drive_archives(client: GitHubClient) -> List[Dict]:
         )
     archives.sort(key=lambda item: item["archive"].get("created_at") or item["created_at"] or "", reverse=True)
     return archives
+
+
+def _cache_get(bucket: Dict, key: Tuple, ttl: float):
+    if ttl <= 0:
+        return None
+    with _CACHE_LOCK:
+        entry = bucket.get(key)
+        if not entry:
+            return None
+        if float(entry.get("expires_at") or 0.0) < time.time():
+            bucket.pop(key, None)
+            return None
+        value = entry.get("value")
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return deepcopy(value)
+
+
+def _cache_set(bucket: Dict, key: Tuple, value) -> None:
+    ttl = 0.0
+    if bucket is _RELEASES_CACHE:
+        ttl = _releases_cache_ttl()
+    elif bucket is _RELEASE_CACHE or bucket is _RELEASE_TAG_CACHE:
+        ttl = _release_cache_ttl()
+    elif bucket is _ASSETS_CACHE:
+        ttl = _assets_cache_ttl()
+    elif bucket is _ASSET_BYTES_CACHE:
+        ttl = _asset_bytes_cache_ttl()
+    if ttl <= 0:
+        return
+    stored = bytes(value) if isinstance(value, (bytes, bytearray)) else deepcopy(value)
+    with _CACHE_LOCK:
+        bucket[key] = {"expires_at": time.time() + ttl, "value": stored}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def _releases_cache_ttl() -> float:
+    return _env_float("GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS", 30.0)
+
+
+def _release_cache_ttl() -> float:
+    return _env_float("GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS", 30.0)
+
+
+def _assets_cache_ttl() -> float:
+    return _env_float("GITHUB_DRIVE_RELEASE_ASSETS_CACHE_TTL_SECONDS", 30.0)
+
+
+def _asset_bytes_cache_ttl() -> float:
+    return _env_float("GITHUB_DRIVE_ASSET_BYTES_CACHE_TTL_SECONDS", 600.0)
+
+
+def _asset_bytes_cache_max_bytes() -> int:
+    return _env_int("GITHUB_DRIVE_ASSET_BYTES_CACHE_MAX_BYTES", 2 * 1024 * 1024)
 
 
 def archive_tag_for(archive_id: str) -> str:
