@@ -476,6 +476,59 @@ function normalizeArchivePath(path) {
   return String(path || "").replace(/^\/+|\/+$/g, "");
 }
 
+function legacySyntheticRootPath(archive = state.selectedArchive, contents = state.selectedArchiveContents) {
+  if (!archive || !contents) return "";
+  const rootName = normalizeArchivePath(archiveTitle(archive));
+  if (!rootName) return "";
+  const entries = Array.isArray(contents.entries) ? contents.entries : [];
+  if (!entries.length) return "";
+  const hasRootFolder = entries.some((entry) => (
+    entry.kind === "folder" && normalizeArchivePath(entry.relative_path) === rootName
+  ));
+  if (!hasRootFolder) return "";
+  const allInsideRoot = entries.every((entry) => {
+    const relativePath = normalizeArchivePath(entry.relative_path);
+    return relativePath === rootName || relativePath.startsWith(`${rootName}/`);
+  });
+  return allInsideRoot ? rootName : "";
+}
+
+function archivePathContext(archive = state.selectedArchive, contents = state.selectedArchiveContents, rawPath = state.selectedArchivePath) {
+  const normalizedPath = normalizeArchivePath(rawPath);
+  const syntheticRootPath = legacySyntheticRootPath(archive, contents);
+  if (!syntheticRootPath) {
+    return {
+      rootPath: "",
+      rawPath: normalizedPath,
+      visiblePath: normalizedPath,
+      segments: normalizedPath ? normalizedPath.split("/") : [],
+    };
+  }
+  if (normalizedPath === syntheticRootPath) {
+    return {
+      rootPath: syntheticRootPath,
+      rawPath: normalizedPath,
+      visiblePath: "",
+      segments: [],
+    };
+  }
+  if (normalizedPath.startsWith(`${syntheticRootPath}/`)) {
+    const visiblePath = normalizedPath.slice(syntheticRootPath.length + 1);
+    return {
+      rootPath: syntheticRootPath,
+      rawPath: normalizedPath,
+      visiblePath,
+      segments: visiblePath ? visiblePath.split("/") : [],
+    };
+  }
+  return {
+    rootPath: syntheticRootPath,
+    rawPath: normalizedPath,
+    visiblePath: normalizedPath,
+    segments: normalizedPath ? normalizedPath.split("/") : [],
+  };
+}
+
 function downloadSelectedEntry(relativePath, kind = "file") {
   const archive = state.selectedArchive;
   if (!archive || !archive.release_id || !relativePath) return;
@@ -494,14 +547,13 @@ function updatePageChrome() {
       : `${state.archives.length} archive${state.archives.length === 1 ? "" : "s"}`;
     return;
   }
-  const path = normalizeArchivePath(state.selectedArchivePath);
+  const pathContext = archivePathContext();
   const meta = archive.archive || {};
   const count = meta.total_items || archive.asset_count || 0;
   const created = formatDate(meta.created_at || archive.created_at || "");
-  title.textContent = path ? basename(path) : archiveTitle(archive);
-  subtitle.textContent = path
-    ? archiveTitle(archive)
-    : `${count} item${count === 1 ? "" : "s"}${created ? ` · ${created}` : ""}`;
+  const pathLabel = ["Home", archiveTitle(archive), ...pathContext.segments].join(" / ");
+  title.textContent = pathLabel;
+  subtitle.textContent = `${count} item${count === 1 ? "" : "s"}${created ? ` · ${created}` : ""}`;
 }
 
 function mergeArchives(existing, incoming) {
@@ -554,7 +606,7 @@ async function deleteArchiveRecord(archive) {
 function syncArchiveBrowserToolbar() {
   const archive = state.selectedArchive;
   const contents = state.selectedArchiveContents;
-  const currentPath = normalizeArchivePath(state.selectedArchivePath);
+  const pathContext = archivePathContext(archive, contents, state.selectedArchivePath);
   const tag = $("archiveDetailTagText");
   const button = $("downloadCurrentFolderButton");
   if (tag) {
@@ -562,12 +614,12 @@ function syncArchiveBrowserToolbar() {
   }
   syncNewMenuState();
   if (!button) return;
-  if (!archive?.release_id || !currentPath) {
+  if (!archive?.release_id || !pathContext.visiblePath) {
     button.style.display = "none";
     return;
   }
   button.style.display = "";
-  button.textContent = `Download ${basename(currentPath) || "folder"}`;
+  button.textContent = `Download ${basename(pathContext.visiblePath) || "folder"}`;
 }
 
 function isMutableArchiveContext() {
@@ -867,13 +919,17 @@ function listArchiveChildren(entries, currentPath) {
 
 function renderArchiveBreadcrumbs() {
   const breadcrumbs = $("archiveBreadcrumbs");
-  const path = normalizeArchivePath(state.selectedArchivePath);
-  const parts = path ? path.split("/") : [];
-  const crumbs = [{ label: "All files", path: "" }];
+  const archive = state.selectedArchive;
+  const pathContext = archivePathContext();
+  const crumbs = [{
+    label: archive ? archiveTitle(archive) : "Archive",
+    path: pathContext.rootPath || "",
+  }];
   let acc = "";
-  for (const part of parts) {
+  for (const part of pathContext.segments) {
     acc = acc ? `${acc}/${part}` : part;
-    crumbs.push({ label: part, path: acc });
+    const fullPath = pathContext.rootPath ? `${pathContext.rootPath}/${acc}` : acc;
+    crumbs.push({ label: part, path: fullPath });
   }
   breadcrumbs.innerHTML = crumbs.map((crumb, index) => {
     const isCurrent = index === crumbs.length - 1;
@@ -1065,6 +1121,12 @@ async function loadSelectedArchiveContents() {
   $("archiveBrowserGrid").innerHTML = "";
   const contents = await fetchJson(`/api/archives/${archive.release_id}/contents`);
   state.selectedArchiveContents = contents;
+  if (!normalizeArchivePath(state.selectedArchivePath)) {
+    const syntheticRootPath = legacySyntheticRootPath(archive, contents);
+    if (syntheticRootPath) {
+      state.selectedArchivePath = syntheticRootPath;
+    }
+  }
   syncSelectedArchiveFromContents(contents);
   renderArchiveContents();
 }
@@ -1588,7 +1650,7 @@ async function createEmptyFolder() {
     });
     await loadArchives({ reset: true });
     state.selectedArchive = created;
-    state.selectedArchivePath = folderName;
+    state.selectedArchivePath = "";
     await loadSelectedArchiveContents();
     showArchiveBrowserView();
   } catch (error) {
