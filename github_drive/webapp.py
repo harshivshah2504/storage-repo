@@ -1429,10 +1429,10 @@ def _limit_user_action(bucket: str, user_id: str) -> None:
 
 
 def _enforce_active_task_limit(user_id: str, task_type: str) -> None:
-    max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 3)
+    max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 1)
     if max_active > 0 and task_store.count_active_tasks(user_id) >= max_active:
         raise RateLimitExceeded(f"You already have {max_active} active transfer(s). Wait for one to finish first.")
-    per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", 2)
+    per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", 1)
     if per_type > 0 and task_store.count_active_tasks(user_id, task_type=task_type) >= per_type:
         raise RateLimitExceeded(f"You already have {per_type} active {task_type} task(s).")
 
@@ -1596,7 +1596,7 @@ def _client_ip() -> str:
 
 
 def _global_active_task_limit() -> int:
-    return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 0)
+    return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 1)
 
 
 def _ensure_task_dispatcher() -> None:

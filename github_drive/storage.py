@@ -269,32 +269,6 @@ def delete_archive_file(
             client.delete_asset(existing_cover["id"])
         except Exception:
             pass
-    next_visual = next((item for item in remaining_items if _is_visual_path(item.get("relative_path") or "")), None)
-    if next_visual:
-        try:
-            media_bytes, _content_type = _read_archive_entry_bytes(
-                client=client,
-                item=next_visual,
-                relative_path=next_visual["relative_path"],
-                member=None,
-                encrypted=encrypted,
-                encode_key=encode_key,
-            )
-            from . import thumbnails
-            cover_bytes = thumbnails.make_cover_from_bytes(
-                media_bytes,
-                suffix=Path(next_visual["relative_path"]).suffix.lower(),
-            )
-            if cover_bytes:
-                _upload_release_asset_bytes_idempotent(
-                    client=client,
-                    release_id=release["id"],
-                    asset_name=COVER_ASSET_NAME,
-                    payload=cover_bytes,
-                    content_type="image/jpeg",
-                )
-        except Exception:
-            pass
 
     return {
         "release_id": release["id"],
@@ -571,31 +545,6 @@ def append_to_archive(
             client.delete_asset(current_cover["id"])
         except Exception:
             pass
-    next_visual = next((item for item in all_items if _is_visual_path(item.get("relative_path") or "")), None)
-    if next_visual:
-        try:
-            media_bytes, _content_type = _read_archive_entry_bytes(
-                client=client,
-                item=next_visual,
-                relative_path=next_visual["relative_path"],
-                member=None,
-                encrypted=encrypt,
-                encode_key=encode_key,
-            )
-            cover_bytes = thumbnails.make_cover_from_bytes(
-                media_bytes,
-                suffix=Path(next_visual["relative_path"]).suffix.lower(),
-            )
-            if cover_bytes:
-                _upload_release_asset_bytes_idempotent(
-                    client=client,
-                    release_id=release["id"],
-                    asset_name=COVER_ASSET_NAME,
-                    payload=cover_bytes,
-                    content_type="image/jpeg",
-                )
-        except Exception:
-            pass
 
     manifest_items = [ArchiveItem(**item) for item in all_items]
     return ArchiveManifest(
@@ -693,22 +642,6 @@ def upload_archive(
     )
 
     existing_assets = {asset["name"]: asset for asset in client.list_release_assets(release_id)}
-
-    # Best-effort cover thumbnail. Failures are non-fatal — listing without _cover.jpg
-    # falls back to the generic icon on the frontend.
-    if cover_candidate and thumbnails.COVER_ASSET_NAME not in existing_assets:
-        cover_bytes = thumbnails.make_cover_for_path(cover_candidate["source_path"])
-        if cover_bytes:
-            try:
-                _upload_release_asset_bytes_idempotent(
-                    client=client,
-                    release_id=release_id,
-                    asset_name=thumbnails.COVER_ASSET_NAME,
-                    payload=cover_bytes,
-                    content_type="image/jpeg",
-                )
-            except Exception:
-                pass
 
     items: List[ArchiveItem] = []
     completed_items = 0
