@@ -1540,12 +1540,12 @@ function sleep(ms) {
 
 async function waitForUploadTask(taskId) {
   while (true) {
-    await sleep(1500);
     let task;
     try {
       task = await fetchJson(`/api/tasks/${taskId}`);
     } catch (error) {
       if (error.status === 404) {
+        await sleep(1500);
         continue;
       }
       throw error;
@@ -1561,6 +1561,7 @@ async function waitForUploadTask(taskId) {
     if (task.status === "failed") {
       throw new Error(task.error || "Upload failed");
     }
+    await sleep(1500);
   }
 }
 
@@ -1575,6 +1576,8 @@ async function uploadFileGroups(groups, uploadForm) {
       results[index] = { status: "fulfilled", value: task };
     } catch (error) {
       results[index] = { status: "rejected", reason: error };
+      if ([401, 403, 409, 429].includes(Number(error.status || 0))) break;
+      if ((error.message || "").includes("active transfer")) break;
     }
   }
   return results;
@@ -1614,7 +1617,12 @@ async function uploadSelectedFiles(files) {
         handleCredentialError(recoveryFailure.reason);
         return;
       }
-      throw new Error(failures.map((failure) => failure.reason.message).join("\n"));
+      const uniqueMessages = [];
+      for (const failure of failures) {
+        const message = failure.reason?.message || "Upload failed";
+        if (!uniqueMessages.includes(message)) uniqueMessages.push(message);
+      }
+      throw new Error(uniqueMessages.join("\n"));
     }
     if (mutableContext && state.selectedArchive) {
       await loadSelectedArchiveContents();
