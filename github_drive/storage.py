@@ -417,6 +417,188 @@ def create_empty_archive(
     )
 
 
+def upload_browser_single_file(
+    *,
+    file_stream,
+    relative_path: str,
+    size_bytes: int,
+    content_type: Optional[str] = None,
+    display_name: Optional[str] = None,
+    private_release: bool = False,
+    retries: int = 3,
+    progress: ProgressCallback = None,
+    client: Optional[GitHubClient] = None,
+) -> ArchiveManifest:
+    client = client or get_client()
+    normalized_relative_path = str(relative_path or "").strip().replace("\\", "/").strip("/")
+    if not normalized_relative_path:
+        raise RuntimeError("relative_path is required.")
+    size_bytes = int(size_bytes)
+    if size_bytes < 0:
+        raise RuntimeError("size_bytes must be non-negative.")
+
+    source_name = (display_name or Path(normalized_relative_path).name or "upload").strip() or "upload"
+    entry = {
+        "source_path": normalized_relative_path,
+        "relative_path": normalized_relative_path,
+        "size_bytes": size_bytes,
+    }
+    plan = _plan_entry_assets(0, entry, encrypt=False)
+    if len(plan) != 1:
+        raise RuntimeError("Direct browser upload currently supports files under the single-asset size limit.")
+
+    from . import thumbnails
+    kinds = thumbnails.classify_entries([entry])
+    cover_candidate = thumbnails.first_visual_entry([entry])
+    created_at = now_utc_iso()
+    archive_meta = {
+        "storage_format": STORAGE_FORMAT,
+        "metadata_version": METADATA_VERSION,
+        "created_at": created_at,
+        "source_name": source_name,
+        "source_type": "file",
+        "source_path": normalized_relative_path,
+        "total_items": 1,
+        "encrypted": False,
+        "storage_mode": STORAGE_MODE_FILE_ASSETS,
+        "kinds": kinds,
+        "cover_asset_name": thumbnails.COVER_ASSET_NAME if cover_candidate else None,
+    }
+    release, archive_meta = _prepare_upload_release(
+        client=client,
+        archive_meta=archive_meta,
+        source_name=source_name,
+        retries=retries,
+        private_release=private_release,
+        resume_release_id=None,
+        resume_tag=None,
+        resume_archive_id=None,
+    )
+    archive_id = archive_meta["archive_id"]
+    release_id = int(release["id"])
+    tag = release.get("tag_name") or archive_tag_for(archive_id)
+    title = release.get("name") or _make_archive_title(source_name, 1)
+
+    emit_progress(
+        progress,
+        "archive_created",
+        {
+            "archive_id": archive_id,
+            "release_id": release_id,
+            "tag": tag,
+            "title": title,
+            "total_items": 1,
+            "html_url": release.get("html_url", ""),
+        },
+    )
+    emit_progress(
+        progress,
+        "item_preparing",
+        {
+            "order": 0,
+            "relative_path": normalized_relative_path,
+            "parts": 1,
+            "multipart": False,
+        },
+    )
+
+    guessed, _ = mimetypes.guess_type(normalized_relative_path)
+    upload_content_type = content_type or guessed or "application/octet-stream"
+    source_sha256 = _sha256_stream(file_stream)
+    asset_name = plan[0]["asset_name"]
+    asset = _retry(
+        f"upload {normalized_relative_path}",
+        retries,
+        lambda: _upload_release_asset_stream_idempotent(
+            client=client,
+            release_id=release_id,
+            asset_name=asset_name,
+            stream=file_stream,
+            content_length=size_bytes,
+            content_type=upload_content_type,
+        ),
+    )
+    item = ArchiveItem(
+        order=0,
+        asset_name=asset_name,
+        asset_id=int(asset["id"]),
+        relative_path=normalized_relative_path,
+        original_size=size_bytes,
+        source_sha256=source_sha256,
+        encrypted=False,
+        content_type=upload_content_type,
+        parts=[{
+            "order": 0,
+            "asset_name": asset_name,
+            "asset_id": int(asset["id"]),
+            "size": int(asset.get("size") or size_bytes),
+        }],
+    )
+    emit_progress(
+        progress,
+        "item_uploaded",
+        {
+            "order": 0,
+            "relative_path": normalized_relative_path,
+            "asset_name": asset_name,
+            "asset_id": int(asset["id"]),
+            "encrypted": False,
+            "parts": 1,
+            "multipart": False,
+            "progress_increment": 1,
+        },
+    )
+
+    manifest_payload = {
+        "storage_format": STORAGE_FORMAT,
+        "metadata_version": METADATA_VERSION,
+        "archive_id": archive_id,
+        "created_at": created_at,
+        "source_name": source_name,
+        "source_type": "file",
+        "source_path": normalized_relative_path,
+        "total_items": 1,
+        "encrypted": False,
+        "storage_mode": STORAGE_MODE_FILE_ASSETS,
+        "items": [asdict(item)],
+    }
+    _retry(
+        "upload manifest",
+        retries,
+        lambda: _upload_release_asset_bytes_idempotent(
+            client=client,
+            release_id=release_id,
+            asset_name=MANIFEST_ASSET_NAME,
+            payload=json.dumps(manifest_payload, indent=2).encode("utf-8"),
+            content_type="application/json",
+        ),
+    )
+    emit_progress(
+        progress,
+        "archive_uploaded",
+        {
+            "archive_id": archive_id,
+            "release_id": release_id,
+            "tag": tag,
+            "html_url": release.get("html_url", ""),
+            "total_items": 1,
+        },
+    )
+    return ArchiveManifest(
+        archive_id=archive_id,
+        release_id=release_id,
+        tag=tag,
+        name=title,
+        html_url=release.get("html_url") or "",
+        source_path=normalized_relative_path,
+        created_at=created_at,
+        total_items=1,
+        encrypted=False,
+        items=[item],
+        storage_mode=STORAGE_MODE_FILE_ASSETS,
+    )
+
+
 def append_to_archive(
     source_path: str,
     base_relative_path: str = "",
@@ -1160,6 +1342,30 @@ def _upload_release_asset_bytes_idempotent(
             release_id=release_id,
             asset_name=asset_name,
             payload=payload,
+            content_type=content_type,
+        )
+    except GitHubError as exc:
+        if _github_error_is_already_exists(exc, field="name"):
+            asset = _find_release_asset_by_name(client, release_id, asset_name)
+            if asset:
+                return asset
+        raise
+
+
+def _upload_release_asset_stream_idempotent(
+    client: GitHubClient,
+    release_id: int,
+    asset_name: str,
+    stream,
+    content_length: int,
+    content_type: str,
+) -> Dict:
+    try:
+        return client.upload_asset_stream(
+            release_id=release_id,
+            asset_name=asset_name,
+            stream=stream,
+            content_length=content_length,
             content_type=content_type,
         )
     except GitHubError as exc:
@@ -2001,4 +2207,23 @@ def _sha256_file(path: str) -> str:
             if not chunk:
                 break
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_stream(stream) -> str:
+    digest = sha256()
+    try:
+        start_pos = int(stream.tell())
+        stream.seek(0)
+    except Exception:
+        start_pos = 0
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    try:
+        stream.seek(start_pos)
+    except Exception:
+        pass
     return digest.hexdigest()

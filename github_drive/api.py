@@ -371,6 +371,44 @@ class GitHubClient:
         self._invalidate_repo_metadata_cache()
         return uploaded
 
+    def upload_asset_stream(
+        self,
+        release_id: int,
+        asset_name: str,
+        stream,
+        content_length: int,
+        content_type: str = "application/octet-stream",
+    ) -> Dict:
+        url = f"{GITHUB_UPLOADS_BASE}/repos/{self.owner}/{self.repo}/releases/{release_id}/assets"
+        headers = dict(self._default_headers())
+        headers["Content-Type"] = content_type
+        headers["Content-Length"] = str(int(content_length))
+        try:
+            start_pos = int(stream.tell())
+        except Exception:
+            start_pos = 0
+
+        def send() -> requests.Response:
+            try:
+                stream.seek(start_pos)
+            except Exception:
+                pass
+            return self._session.post(
+                url,
+                params={"name": asset_name},
+                headers=headers,
+                data=stream,
+                timeout=max(self.timeout, 600),
+            )
+
+        response = self._request_with_retries(f"upload asset {asset_name}", send)
+        uploaded = response.json()
+        with _CACHE_LOCK:
+            _ASSET_TO_RELEASE[(self._cache_namespace, int(uploaded["id"]))] = int(release_id)
+        self._invalidate_release_assets_cache(int(release_id))
+        self._invalidate_repo_metadata_cache()
+        return uploaded
+
     def upload_asset_bytes(
         self,
         release_id: int,

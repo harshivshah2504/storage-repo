@@ -47,6 +47,7 @@ from .storage import (
     list_remote_archives,
     list_remote_archives_page,
     read_archive_file,
+    upload_browser_single_file,
     upload_archive,
 )
 
@@ -858,6 +859,59 @@ def create_app() -> Flask:
         requested_source_type = (request.form.get("source_type_override") or "").strip().lower()
         if requested_source_type not in {"file", "directory"}:
             requested_source_type = None
+        encrypt = request.form.get("encrypt", "false").lower() == "true"
+        private_release = request.form.get("private_release", "false").lower() == "true"
+        retries = int(request.form.get("retries", 3))
+        append_tag = (request.form.get("append_tag") or "").strip() or None
+        append_relative_path = _normalize_virtual_path(request.form.get("append_relative_path") or "") or None
+
+        if len(uploaded_files) == 1:
+            uploaded_file = uploaded_files[0]
+            raw_relative_path = relative_paths[0] if relative_paths else uploaded_file.filename
+            try:
+                relative_path = _safe_upload_relative_path(raw_relative_path, uploaded_file.filename or "upload")
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            size_bytes = _uploaded_file_size(uploaded_file)
+            if size_bytes > _max_user_upload_bytes():
+                return jsonify({"error": f"Upload exceeds the per-upload limit of {_max_user_upload_bytes()} bytes."}), 413
+            direct_upload_ok = (
+                not encrypt
+                and not append_tag
+                and not append_relative_path
+                and "/" not in relative_path
+                and size_bytes > 0
+            )
+            if direct_upload_ok:
+                payload = {
+                    "source_path": relative_path,
+                    "private_release": private_release,
+                    "retries": retries,
+                    "encrypt": False,
+                    "upload_origin": "browser-transfer",
+                    "uploaded_file_count": 1,
+                    "browser_display_name": Path(relative_path).name or "Upload",
+                    "browser_direct_upload": True,
+                }
+                task_id = _create_task("upload", g.user_id, payload)
+                _update_task(task_id, status="running")
+                try:
+                    client = _user_client(g.user_id)
+                    result = upload_browser_single_file(
+                        file_stream=uploaded_file.stream,
+                        relative_path=relative_path,
+                        size_bytes=size_bytes,
+                        content_type=(uploaded_file.mimetype or None),
+                        display_name=requested_source_name or Path(relative_path).name,
+                        private_release=private_release,
+                        retries=retries,
+                        progress=lambda event, progress_payload: _task_progress(task_id, event, progress_payload),
+                        client=client,
+                    )
+                    _update_task(task_id, status="completed", result=_serialize(result))
+                except Exception as exc:
+                    _update_task(task_id, status="failed", error=str(exc))
+                return jsonify({"task_id": task_id})
 
         staging_root = Path(tempfile.mkdtemp(prefix="github-drive-web-upload-"))
         saved_paths = []
@@ -897,18 +951,17 @@ def create_app() -> Flask:
                 source_name_override = requested_source_name
                 source_type_override = requested_source_type or "directory"
 
-        encrypt = request.form.get("encrypt", "false").lower() == "true"
         payload = {
             "source_path": source_path,
-            "private_release": request.form.get("private_release", "false").lower() == "true",
+            "private_release": private_release,
             "workers": int(request.form.get("workers", 2)),
             "recursive": request.form.get("recursive", "true").lower() == "true",
-            "retries": int(request.form.get("retries", 3)),
+            "retries": retries,
             "encrypt": encrypt,
             "upload_mode": (request.form.get("upload_mode") or "auto").strip().lower() or "auto",
             "resume_tag": (request.form.get("resume_tag") or "").strip() or None,
-            "append_tag": (request.form.get("append_tag") or "").strip() or None,
-            "append_relative_path": _normalize_virtual_path(request.form.get("append_relative_path") or "") or None,
+            "append_tag": append_tag,
+            "append_relative_path": append_relative_path,
             "cleanup_staging_root": str(staging_root),
             "upload_origin": "browser-transfer",
             "uploaded_file_count": len(saved_paths),
@@ -1821,6 +1874,28 @@ def _safe_upload_relative_path(raw_path: str, fallback_name: str) -> str:
     if not parts:
         parts = [_safe_download_name(fallback_name or "upload")]
     return "/".join(parts)
+
+
+def _uploaded_file_size(uploaded_file) -> int:
+    content_length = getattr(uploaded_file, "content_length", None)
+    if content_length is not None:
+        try:
+            value = int(content_length)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    stream = getattr(uploaded_file, "stream", None)
+    if stream is None:
+        return 0
+    try:
+        current = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = int(stream.tell())
+        stream.seek(current)
+        return max(0, size)
+    except Exception:
+        return 0
 
 
 def _normalize_virtual_path(path: str) -> str:
