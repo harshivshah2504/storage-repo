@@ -266,7 +266,7 @@ def create_app() -> Flask:
         except RateLimitExceeded as exc:
             return _render_auth_page(mode="login", error=str(exc), status=429)
         if _turnstile_enabled():
-            error = _verify_turnstile("login")
+            error = _verify_turnstile("auth")
             if error:
                 return _render_auth_page(mode="login", error=error, status=400)
         username = (request.form.get("username") or "").strip()
@@ -300,7 +300,7 @@ def create_app() -> Flask:
         except RateLimitExceeded as exc:
             return _render_auth_page(mode="signup", error=str(exc), status=429)
         if _turnstile_enabled():
-            error = _verify_turnstile("signup")
+            error = _verify_turnstile("auth")
             if error:
                 return _render_auth_page(mode="signup", error=error, status=400)
         username = (request.form.get("username") or "").strip()
@@ -336,7 +336,7 @@ def create_app() -> Flask:
         except RateLimitExceeded as exc:
             return _render_auth_page(mode="login", error=str(exc), status=429)
         if _turnstile_enabled():
-            error = _verify_turnstile("github-oauth")
+            error = _verify_turnstile("auth")
             if error:
                 mode = "signup" if (request.form.get("mode") or "").strip() == "signup" else "login"
                 return _render_auth_page(mode=mode, error=error, status=400)
@@ -908,6 +908,14 @@ def create_app() -> Flask:
             "upload_origin": "browser-transfer",
             "uploaded_file_count": len(saved_paths),
         }
+        if len(saved_paths) == 1:
+            payload["browser_display_name"] = Path(safe_relative_paths[0]).name or "Upload"
+        elif folder_root:
+            payload["browser_display_name"] = folder_root
+        elif requested_source_name:
+            payload["browser_display_name"] = requested_source_name
+        else:
+            payload["browser_display_name"] = f"Selection - {len(saved_paths)} files"
         if source_name_override:
             payload["source_name_override"] = source_name_override
         if source_type_override:
@@ -1029,6 +1037,7 @@ def _run_upload_task(task_id: str) -> None:
     cleanup_staging_root = payload.pop("cleanup_staging_root", None)
     payload.pop("upload_origin", None)
     payload.pop("uploaded_file_count", None)
+    payload.pop("browser_display_name", None)
     encrypt = bool(payload.get("encrypt", False))
     try:
         client = _user_client(user_id)
