@@ -756,10 +756,13 @@ function renderArchives() {
     const created = formatDate(meta.created_at || archive.created_at || "");
     const kind = archiveDisplayKind(archive);
     const kindLabel = KIND_LABEL[kind] || "Files";
-    // Server-side thumbnail generation has been removed (it loaded full assets
-    // into RAM and was OOM-killing the 512 MB instance). Always render the
-    // kind icon — cheap, no extra request, and uniform across archive types.
-    const thumb = `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
+    // Covers are only requested for image archives. Videos and other kinds
+    // skip the request entirely and render the kind icon, since server-side
+    // video thumbnail generation was the OOM offender we removed.
+    const hasCover = kind === "image" || (kind !== "folder" && kind !== "video" && Boolean(meta.cover_asset_name));
+    const thumb = hasCover
+      ? `<img loading="lazy" decoding="async" src="/api/archives/${archive.release_id}/cover" alt="">`
+      : `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
     return `
       <div class="archive-card" data-index="${index}">
         <div class="archive-thumb">
@@ -782,6 +785,15 @@ function renderArchives() {
       </div>
     `;
   }).join("");
+  grid.querySelectorAll(".archive-thumb img").forEach((img) => {
+    img.addEventListener("error", () => {
+      const card = img.closest(".archive-card");
+      const idx = Number(card?.dataset.index);
+      const archive = state.filteredArchives[idx];
+      const fallbackKind = archive ? archiveDisplayKind(archive) : "other";
+      img.parentElement.innerHTML = `<div class="archive-thumb-fallback">${KIND_ICONS[fallbackKind] || ARCHIVE_ICON_INLINE}</div>`;
+    });
+  });
   grid.querySelectorAll(".archive-card").forEach((card) => {
     card.addEventListener("click", () => {
       const archive = state.filteredArchives[Number(card.dataset.index)];
@@ -1492,7 +1504,90 @@ function groupFilesForUpload(files) {
   return Array.from(groups.values());
 }
 
-function makeUploadFormData(uploadForm, group) {
+const COVER_IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp"]);
+const COVER_TARGET_SIZE = 480;
+const COVER_JPEG_QUALITY = 0.82;
+
+function fileExtension(name) {
+  const lower = String(name || "").toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  return dot >= 0 ? lower.slice(dot + 1) : "";
+}
+
+function pickCoverFile(group) {
+  for (const entry of group.entries || []) {
+    if (COVER_IMAGE_EXTENSIONS.has(fileExtension(entry.file.name))) return entry.file;
+  }
+  return null;
+}
+
+async function generateImageCoverBlob(file, size = COVER_TARGET_SIZE) {
+  // Prefer createImageBitmap with resize hints — the browser can subsample at
+  // decode time, which keeps peak memory near the output bitmap size instead
+  // of the full source resolution.
+  if (typeof createImageBitmap === "function") {
+    try {
+      const bitmap = await createImageBitmap(file, {
+        resizeWidth: size * 2,
+        resizeHeight: size * 2,
+        resizeQuality: "high",
+      });
+      try {
+        const canvas = (typeof OffscreenCanvas === "function")
+          ? new OffscreenCanvas(size, size)
+          : Object.assign(document.createElement("canvas"), { width: size, height: size });
+        const ctx = canvas.getContext("2d");
+        const w = bitmap.width;
+        const h = bitmap.height;
+        const side = Math.min(w, h);
+        const sx = (w - side) / 2;
+        const sy = (h - side) / 2;
+        ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, size, size);
+        if (typeof canvas.convertToBlob === "function") {
+          return await canvas.convertToBlob({ type: "image/jpeg", quality: COVER_JPEG_QUALITY });
+        }
+        return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", COVER_JPEG_QUALITY));
+      } finally {
+        bitmap.close?.();
+      }
+    } catch (_) {
+      // fall through to <img> path
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        const side = Math.min(w, h);
+        const sx = (w - side) / 2;
+        const sy = (h - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(url);
+          if (blob) resolve(blob);
+          else reject(new Error("Failed to encode cover JPEG"));
+        }, "image/jpeg", COVER_JPEG_QUALITY);
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to decode source image"));
+    };
+    img.src = url;
+  });
+}
+
+async function makeUploadFormData(uploadForm, group) {
   const formData = new FormData(uploadForm);
   formData.set("encrypt", uploadForm.querySelector('input[name="encrypt"]').checked ? "true" : "false");
   formData.append("retries", "3");
@@ -1506,11 +1601,28 @@ function makeUploadFormData(uploadForm, group) {
     formData.append("files", entry.file, entry.file.name);
     formData.append("relative_paths", entry.relativePath);
   }
+
+  // Generate the cover JPEG client-side and ship it with the upload — no
+  // server-side image decoding required. Best-effort: if the browser can't
+  // decode this format, we just skip the cover.
+  if (!group.appendTag) {
+    const coverSource = pickCoverFile(group);
+    if (coverSource) {
+      try {
+        const coverBlob = await generateImageCoverBlob(coverSource);
+        if (coverBlob && coverBlob.size > 0) {
+          formData.append("cover_blob", coverBlob, "_cover.jpg");
+        }
+      } catch (_) {
+        // ignore — server already has a fallback path
+      }
+    }
+  }
   return formData;
 }
 
 async function uploadFileGroup(group, uploadForm) {
-  const formData = makeUploadFormData(uploadForm, group);
+  const formData = await makeUploadFormData(uploadForm, group);
   const headers = {};
   if (window.__GD_CSRF_TOKEN__) headers["X-CSRF-Token"] = window.__GD_CSRF_TOKEN__;
   const response = await fetch("/api/upload-files", { method: "POST", body: formData, headers, credentials: "same-origin" });
@@ -1564,21 +1676,46 @@ async function waitForUploadTask(taskId) {
   }
 }
 
+// Cap on how many uploads the browser will have in flight at once. Should
+// match (or be just under) GITHUB_DRIVE_MAX_ACTIVE_UPLOADS_PER_USER on the
+// server, otherwise the (N+1)-th request bounces with HTTP 429.
+const UPLOAD_CONCURRENCY = 3;
+
 async function uploadFileGroups(groups, uploadForm) {
   const results = new Array(groups.length);
-  // Submit one archive at a time and wait for completion before starting the next.
-  // This keeps independent uploads independent while respecting the free-tier task/memory limits.
-  for (let index = 0; index < groups.length; index += 1) {
-    try {
-      const queued = await uploadFileGroup(groups[index], uploadForm);
-      const task = await waitForUploadTask(queued.task_id);
-      results[index] = { status: "fulfilled", value: task };
-    } catch (error) {
-      results[index] = { status: "rejected", reason: error };
-      if ([401, 403, 409, 429].includes(Number(error.status || 0))) break;
-      if ((error.message || "").includes("active transfer")) break;
+  if (!groups.length) return results;
+  // Worker pool: each worker pulls the next pending group, performs the full
+  // submit-then-wait cycle, and recurses. Order of completion is independent
+  // of submission order, but results[index] preserves caller ordering.
+  const queue = groups.map((group, index) => ({ group, index }));
+  const concurrency = Math.min(UPLOAD_CONCURRENCY, queue.length);
+  let halt = false;
+
+  async function worker() {
+    while (!halt) {
+      const item = queue.shift();
+      if (!item) return;
+      try {
+        const queued = await uploadFileGroup(item.group, uploadForm);
+        const task = await waitForUploadTask(queued.task_id);
+        results[item.index] = { status: "fulfilled", value: task };
+      } catch (error) {
+        results[item.index] = { status: "rejected", reason: error };
+        const status = Number(error.status || 0);
+        // Hard-stop conditions: auth/permission errors won't recover by
+        // retrying, so abandon remaining work in this batch.
+        if ([401, 403, 409].includes(status)) {
+          halt = true;
+          while (queue.length) {
+            const remaining = queue.shift();
+            results[remaining.index] = { status: "rejected", reason: error };
+          }
+        }
+      }
     }
   }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return results;
 }
 
