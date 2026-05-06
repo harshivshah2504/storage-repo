@@ -20,6 +20,7 @@ const state = {
   taskPollInFlight: false,
   taskPollHasActive: false,
   taskPollErrorCount: 0,
+  refreshedUploadTaskIds: {},
 };
 
 const TEXT_PREVIEW_EXTENSIONS = new Set([
@@ -1429,9 +1430,13 @@ async function loadTasks() {
     state.taskPollHasActive = hasActiveTasks(tasks);
     state.taskPollErrorCount = 0;
     // If a freshly-completed upload comes in, refresh the archives list.
-    const completedUpload = tasks.find((t) => t.type === "upload" && t.status === "completed" && !t._archivesRefreshed);
+    const completedUpload = tasks.find((t) => (
+      t.type === "upload"
+      && t.status === "completed"
+      && !state.refreshedUploadTaskIds[t.id]
+    ));
     if (completedUpload) {
-      completedUpload._archivesRefreshed = true;
+      state.refreshedUploadTaskIds[completedUpload.id] = true;
       loadArchives({ reset: true });
     }
   } catch (_) {
