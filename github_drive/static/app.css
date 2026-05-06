@@ -1450,6 +1450,10 @@ input, select {
   min-height: 66px;
 }
 
+.auth-turnstile-shared {
+  margin: 0 0 16px;
+}
+
 .auth-turnstile .cf-turnstile {
   width: 100%;
 }

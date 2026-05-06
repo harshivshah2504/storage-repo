@@ -1350,7 +1350,6 @@ async function deleteSelectedArchive() {
 function shouldShowToast(tasks) {
   if (state.toastDismissed) return false;
   if (!tasks.length) return false;
-  // Show if there's anything queued or running, or if there's a fresh completed download with a fetch link.
   const hasActive = tasks.some((t) => t.status === "queued" || t.status === "running");
   const hasFreshDownload = tasks.some((t) => t.type === "download" && t.status === "completed" && t.id === state.activeDownloadTaskId);
   return hasActive || hasFreshDownload;
@@ -1376,10 +1375,9 @@ function renderTasks(tasks) {
   }
 
   const active = tasks.filter((t) => t.status === "queued" || t.status === "running");
-  const recentlyDone = tasks.filter((t) => t.status === "completed" || t.status === "failed").slice(0, 5);
-  title.textContent = active.length ? `Transfers (${active.length})` : "Transfers";
-
-  const ordered = [...active, ...recentlyDone];
+  const currentDownload = tasks.find((t) => t.type === "download" && t.status === "completed" && t.id === state.activeDownloadTaskId);
+  const ordered = active.length ? active : (currentDownload ? [currentDownload] : []);
+  title.textContent = ordered.length ? `Transfers (${ordered.length})` : "Transfers";
 
   body.innerHTML = ordered.map((task) => {
     const payload = task.payload || {};
@@ -1448,10 +1446,11 @@ async function loadTasks() {
 
 function uploadTaskLabel(payload) {
   if (payload.upload_origin !== "browser-transfer") return payload.source_path || "Upload";
+  const displayName = payload.browser_display_name || payload.source_name_override || "";
   const count = Number(payload.uploaded_file_count || 0);
+  if (displayName && count <= 1) return displayName;
   const countLabel = `${count} file${count === 1 ? "" : "s"}`;
-  const sourceName = payload.source_name_override || "";
-  return sourceName ? `${sourceName} - ${countLabel}` : countLabel;
+  return displayName ? `${displayName} - ${countLabel}` : countLabel;
 }
 
 function normalizeUploadRelativePath(path) {
