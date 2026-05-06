@@ -1097,6 +1097,10 @@ def _run_upload_task(task_id: str) -> None:
     payload.pop("uploaded_file_count", None)
     payload.pop("browser_display_name", None)
     encrypt = bool(payload.get("encrypt", False))
+    # Flip to "running" before any blocking calls so the UI doesn't sit on QUEUED
+    # while we open a DB connection / decrypt the stored PAT.
+    if str(task.get("status") or "") != "running":
+        _update_task(task_id, status="running")
     try:
         client = _user_client(user_id)
     except Exception as exc:
@@ -1112,7 +1116,6 @@ def _run_upload_task(task_id: str) -> None:
             if cleanup_staging_root:
                 shutil.rmtree(cleanup_staging_root, ignore_errors=True)
             return
-    _update_task(task_id, status="running")
     try:
         append_tag = payload.pop("append_tag", None)
         append_relative_path = payload.pop("append_relative_path", None)
@@ -1153,6 +1156,8 @@ def _run_download_task(task_id: str) -> None:
         return
     user_id = task.get("user_id") or ""
     payload = dict(task["payload"])
+    if str(task.get("status") or "") != "running":
+        _update_task(task_id, status="running")
     try:
         client = _user_client(user_id)
     except Exception as exc:
@@ -1162,7 +1167,6 @@ def _run_download_task(task_id: str) -> None:
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         return
-    _update_task(task_id, status="running")
     try:
         try:
             payload["encode_key"] = _user_encode_key(user_id)
@@ -1209,14 +1213,24 @@ def _create_task(task_type: str, user_id: str, payload: Dict[str, Any], initial_
 
 
 def _start_task_thread(task_id: str, runner) -> None:
+    global _TASK_ACTIVE_RUNNERS
     max_active = _global_active_task_limit()
     if max_active <= 0:
         _launch_task_runner(task_id, runner, counted=False)
         return
     _ensure_task_dispatcher()
+    # Fast path: if a runner slot is free, take it now and launch directly
+    # instead of paying the dispatcher's wake-up latency.
     with _TASK_QUEUE_COND:
-        _TASK_QUEUE.append({"task_id": task_id, "runner": runner})
-        _TASK_QUEUE_COND.notify_all()
+        if not _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < max_active:
+            _TASK_ACTIVE_RUNNERS += 1
+            launch_now = True
+        else:
+            _TASK_QUEUE.append({"task_id": task_id, "runner": runner})
+            _TASK_QUEUE_COND.notify_all()
+            launch_now = False
+    if launch_now:
+        _launch_task_runner(task_id, runner, counted=True)
 
 
 def _get_task_internal(task_id: str) -> Optional[Dict]:
@@ -1739,21 +1753,31 @@ def _ensure_task_dispatcher() -> None:
         thread = threading.Thread(target=_task_dispatcher_loop, daemon=True, name="github-drive-task-dispatcher")
         thread.start()
         _TASK_DISPATCHER_STARTED = True
+        LOG.info("task dispatcher started (pid=%s)", os.getpid())
 
 
 def _task_dispatcher_loop() -> None:
     global _TASK_ACTIVE_RUNNERS
 
     while True:
-        with _TASK_QUEUE_COND:
-            while True:
-                limit = max(1, _global_active_task_limit())
-                if _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < limit:
-                    queued = _TASK_QUEUE.pop(0)
-                    _TASK_ACTIVE_RUNNERS += 1
-                    break
-                _TASK_QUEUE_COND.wait(timeout=1.0)
-        _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
+        try:
+            with _TASK_QUEUE_COND:
+                while True:
+                    limit = max(1, _global_active_task_limit())
+                    if _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < limit:
+                        queued = _TASK_QUEUE.pop(0)
+                        _TASK_ACTIVE_RUNNERS += 1
+                        break
+                    _TASK_QUEUE_COND.wait(timeout=1.0)
+            LOG.info(
+                "dispatching task %s (active=%s queue=%s)",
+                queued.get("task_id"),
+                _TASK_ACTIVE_RUNNERS,
+                len(_TASK_QUEUE),
+            )
+            _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
+        except Exception:
+            LOG.exception("task dispatcher iteration failed; continuing")
 
 
 def _launch_task_runner(task_id: str, runner, counted: bool) -> None:
