@@ -1,6 +1,5 @@
 import base64
 import functools
-import io
 import json
 import logging
 import os
@@ -22,6 +21,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    after_this_request,
     g,
     jsonify,
     redirect,
@@ -43,10 +43,10 @@ from .storage import (
     delete_archive,
     delete_archive_file,
     download_archive,
+    fetch_archive_file_to_disk,
     list_archive_contents,
     list_remote_archives,
     list_remote_archives_page,
-    read_archive_file,
     upload_browser_single_file,
     upload_archive,
 )
@@ -531,6 +531,11 @@ def create_app() -> Flask:
     @app.get("/api/archives/<int:release_id>/cover")
     @login_required
     def archive_cover(release_id: int):
+        # Server-side cover generation has been removed: pulling a full asset
+        # (potentially a multi-hundred-MB video) into RAM just to generate a
+        # thumbnail is what was OOM-killing the 512 MB Render instance. We now
+        # only serve a pre-uploaded `_cover.jpg` if one exists, and 404
+        # otherwise so the front end falls back to a kind icon.
         from . import thumbnails
         try:
             client = _user_client(g.user_id)
@@ -539,34 +544,7 @@ def create_app() -> Flask:
             abort(404)
         cover = next((a for a in assets if a["name"] == thumbnails.COVER_ASSET_NAME), None)
         if not cover:
-            legacy_visual = thumbnails.first_visual_asset(assets)
-            if not legacy_visual:
-                abort(404)
-            try:
-                original = client.download_asset_bytes(legacy_visual["id"])
-                data = thumbnails.make_cover_from_bytes(
-                    original,
-                    suffix=Path(legacy_visual.get("name") or "").suffix.lower(),
-                )
-            except Exception:
-                abort(404)
-            if not data:
-                abort(404)
-            try:
-                uploaded = client.upload_asset_bytes(
-                    release_id=release_id,
-                    asset_name=thumbnails.COVER_ASSET_NAME,
-                    payload=data,
-                    content_type="image/jpeg",
-                )
-                cover = uploaded
-            except Exception:
-                cover = None
-            return Response(
-                data,
-                mimetype="image/jpeg",
-                headers={"Cache-Control": "private, max-age=600"},
-            )
+            abort(404)
         try:
             data = client.download_asset_bytes(cover["id"], use_cache=True)
         except Exception:
@@ -645,41 +623,32 @@ def create_app() -> Flask:
     @app.get("/api/archives/<int:release_id>/file")
     @login_required
     def archive_file(release_id: int):
-        from . import thumbnails
-
         relative_path = (request.args.get("path") or "").strip()
         if not relative_path:
             return jsonify({"error": "path is required"}), 400
-        thumb = (request.args.get("thumb") or "").strip().lower() in {"1", "true", "yes"}
         try:
             client = _user_client(g.user_id)
             encode_key = _user_encode_key(g.user_id)
-            payload, content_type = read_archive_file(
+            entry_path, content_type, cleanup = fetch_archive_file_to_disk(
                 release_id=release_id,
                 relative_path=relative_path,
                 encode_key=encode_key,
                 client=client,
             )
-            if thumb:
-                thumb_bytes = thumbnails.make_cover_from_bytes(
-                    payload,
-                    suffix=Path(relative_path).suffix.lower(),
-                )
-                if not thumb_bytes:
-                    abort(404)
-                return Response(
-                    thumb_bytes,
-                    mimetype="image/jpeg",
-                    headers={"Cache-Control": "private, max-age=600"},
-                )
         except RuntimeError as exc:
             return _credential_error_response(exc)
         except Exception:
             abort(404)
-        return Response(
-            payload,
+
+        @after_this_request
+        def _cleanup_temp(response):
+            cleanup()
+            return response
+
+        return send_file(
+            entry_path,
             mimetype=content_type or "application/octet-stream",
-            headers={"Cache-Control": "private, max-age=600"},
+            max_age=600,
         )
 
     @app.get("/api/archives/<int:release_id>/download-entry")
@@ -695,14 +664,20 @@ def create_app() -> Flask:
             client = _user_client(g.user_id)
             encode_key = _user_encode_key(g.user_id)
             if kind == "file":
-                payload, content_type = read_archive_file(
+                entry_path, content_type, cleanup = fetch_archive_file_to_disk(
                     release_id=release_id,
                     relative_path=relative_path,
                     encode_key=encode_key,
                     client=client,
                 )
+
+                @after_this_request
+                def _cleanup_single(response):
+                    cleanup()
+                    return response
+
                 return send_file(
-                    io.BytesIO(payload),
+                    entry_path,
                     mimetype=content_type or "application/octet-stream",
                     as_attachment=True,
                     download_name=Path(relative_path).name or "download",
@@ -725,21 +700,28 @@ def create_app() -> Flask:
             folder_name = Path(relative_path).name or "folder"
             temp_dir = Path(tempfile.mkdtemp(prefix="github-drive-entry-zip-"))
             zip_path = temp_dir / f"{_safe_download_name(folder_name)}.zip"
+            # Stream every member through disk: download to a temp file, write
+            # it into the zip via archive.write(), drop the temp file, then move
+            # to the next entry. At any moment only one file is materialized,
+            # so a 50-file folder doesn't accumulate 50 file payloads in RAM.
             with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
                 if folder_exists and not matched_entries:
                     archive.writestr(f"{folder_name}/", b"")
                 for entry in matched_entries:
-                    entry_path = entry.get("relative_path") or ""
-                    payload, _content_type = read_archive_file(
+                    entry_path_value = entry.get("relative_path") or ""
+                    remainder = entry_path_value[len(prefix):].lstrip("/")
+                    if not remainder:
+                        continue
+                    member_path, _content_type, member_cleanup = fetch_archive_file_to_disk(
                         release_id=release_id,
-                        relative_path=entry_path,
+                        relative_path=entry_path_value,
                         encode_key=encode_key,
                         client=client,
                     )
-                    remainder = entry_path[len(prefix):].lstrip("/")
-                    if not remainder:
-                        continue
-                    archive.writestr(f"{folder_name}/{remainder}", payload)
+                    try:
+                        archive.write(member_path, arcname=f"{folder_name}/{remainder}")
+                    finally:
+                        member_cleanup()
 
             response = send_file(
                 zip_path,
@@ -1216,11 +1198,17 @@ def _start_task_thread(task_id: str, runner) -> None:
     global _TASK_ACTIVE_RUNNERS
     max_active = _global_active_task_limit()
     if max_active <= 0:
+        # No global cap: this task will run immediately, so skip the visible
+        # "queued" state and reflect that in the task row before we return.
+        _update_task(task_id, status="running")
         _launch_task_runner(task_id, runner, counted=False)
         return
     _ensure_task_dispatcher()
     # Fast path: if a runner slot is free, take it now and launch directly
-    # instead of paying the dispatcher's wake-up latency.
+    # instead of paying the dispatcher's wake-up latency. We also flip the
+    # task to "running" synchronously so the very next /api/tasks poll from
+    # the browser shows "running" instead of "queued" — this is what the
+    # direct single-file upload path already does, applied uniformly here.
     with _TASK_QUEUE_COND:
         if not _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < max_active:
             _TASK_ACTIVE_RUNNERS += 1
@@ -1230,6 +1218,7 @@ def _start_task_thread(task_id: str, runner) -> None:
             _TASK_QUEUE_COND.notify_all()
             launch_now = False
     if launch_now:
+        _update_task(task_id, status="running")
         _launch_task_runner(task_id, runner, counted=True)
 
 
@@ -1775,6 +1764,7 @@ def _task_dispatcher_loop() -> None:
                 _TASK_ACTIVE_RUNNERS,
                 len(_TASK_QUEUE),
             )
+            _update_task(queued["task_id"], status="running")
             _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
         except Exception:
             LOG.exception("task dispatcher iteration failed; continuing")

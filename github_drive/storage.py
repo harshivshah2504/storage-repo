@@ -169,14 +169,25 @@ def list_archive_contents(
     }
 
 
-def read_archive_file(
+def fetch_archive_file_to_disk(
     relative_path: str,
     release_id: Optional[int] = None,
     tag: Optional[str] = None,
     archive_id: Optional[str] = None,
     encode_key: Optional[bytes] = None,
     client: Optional[GitHubClient] = None,
-) -> Tuple[bytes, str]:
+) -> Tuple[str, str, "Callable[[], None]"]:
+    """Materialize a single archive entry to a temp file on disk.
+
+    Returns ``(path, content_type, cleanup)``. The caller MUST invoke
+    ``cleanup()`` exactly once (typically via Flask's ``after_this_request``)
+    after the file has been streamed to its consumer; cleanup removes the
+    temp directory containing ``path``.
+
+    Returning a path instead of a ``bytes`` blob keeps the entire entry off
+    the Python heap so a multi-hundred-MB asset never crosses the 512 MB
+    Render free-tier ceiling.
+    """
     client = client or get_client()
     _release, _archive_meta, _assets, _by_name, _manifest, items, encrypted, storage_mode = _load_archive_snapshot(
         client=client,
@@ -187,14 +198,47 @@ def read_archive_file(
     item, member = _find_archive_entry(items, storage_mode, relative_path)
     if item is None:
         raise RuntimeError(f"File {relative_path!r} was not found in this archive.")
-    return _read_archive_entry_bytes(
-        client=client,
-        item=item,
-        relative_path=relative_path,
-        member=member,
-        encrypted=encrypted,
-        encode_key=encode_key,
-    )
+
+    temp_dir = tempfile.mkdtemp(prefix="github-drive-fetch-")
+
+    def cleanup() -> None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    try:
+        if member is not None:
+            bundle_path = os.path.join(temp_dir, "bundle.zip")
+            _materialize_download_parts(
+                client=client,
+                item=item,
+                output_path=bundle_path,
+                encrypted=encrypted,
+                encode_key=encode_key,
+                retries=3,
+            )
+            extracted_path = os.path.join(temp_dir, "entry.bin")
+            with zipfile.ZipFile(bundle_path, "r") as archive:
+                with archive.open(relative_path, "r") as src, open(extracted_path, "wb") as dst:
+                    while True:
+                        chunk = src.read(COPY_BUFFER)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+            os.unlink(bundle_path)
+            return extracted_path, member.get("content_type") or "application/octet-stream", cleanup
+
+        file_path = os.path.join(temp_dir, "entry.bin")
+        _materialize_download_parts(
+            client=client,
+            item=item,
+            output_path=file_path,
+            encrypted=encrypted,
+            encode_key=encode_key,
+            retries=3,
+        )
+        return file_path, item.get("content_type") or "application/octet-stream", cleanup
+    except Exception:
+        cleanup()
+        raise
 
 
 def delete_archive_file(
@@ -1998,46 +2042,6 @@ def _find_archive_entry(items: List[Dict], storage_mode: str, relative_path: str
         if item.get("relative_path") == needle:
             return item, None
     return None, None
-
-
-def _read_archive_entry_bytes(
-    client: GitHubClient,
-    item: Dict,
-    relative_path: str,
-    member: Optional[Dict],
-    encrypted: bool,
-    encode_key: Optional[bytes],
-    retries: int = 3,
-) -> Tuple[bytes, str]:
-    temp_dir = tempfile.mkdtemp(prefix="github-drive-read-")
-    try:
-        if member is not None:
-            bundle_path = os.path.join(temp_dir, "bundle.zip")
-            _materialize_download_parts(
-                client=client,
-                item=item,
-                output_path=bundle_path,
-                encrypted=encrypted,
-                encode_key=encode_key,
-                retries=retries,
-            )
-            with zipfile.ZipFile(bundle_path, "r") as archive:
-                with archive.open(relative_path, "r") as src:
-                    return src.read(), member.get("content_type") or "application/octet-stream"
-
-        file_path = os.path.join(temp_dir, "entry.bin")
-        _materialize_download_parts(
-            client=client,
-            item=item,
-            output_path=file_path,
-            encrypted=encrypted,
-            encode_key=encode_key,
-            retries=retries,
-        )
-        with open(file_path, "rb") as handle:
-            return handle.read(), item.get("content_type") or "application/octet-stream"
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _manifest_item_from_download_item(item: Dict) -> Dict:
