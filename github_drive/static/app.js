@@ -756,10 +756,10 @@ function renderArchives() {
     const created = formatDate(meta.created_at || archive.created_at || "");
     const kind = archiveDisplayKind(archive);
     const kindLabel = KIND_LABEL[kind] || "Files";
-    const hasCover = kind !== "folder" && (Boolean(meta.cover_asset_name) || kind === "image");
-    const thumb = hasCover
-      ? `<img loading="lazy" decoding="async" src="/api/archives/${archive.release_id}/cover" alt="">`
-      : `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
+    // Server-side thumbnail generation has been removed (it loaded full assets
+    // into RAM and was OOM-killing the 512 MB instance). Always render the
+    // kind icon — cheap, no extra request, and uniform across archive types.
+    const thumb = `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
     return `
       <div class="archive-card" data-index="${index}">
         <div class="archive-thumb">
@@ -782,16 +782,6 @@ function renderArchives() {
       </div>
     `;
   }).join("");
-  // Wire fallback for broken images without inline JS attribute string escapes.
-  grid.querySelectorAll(".archive-thumb img").forEach((img) => {
-    img.addEventListener("error", () => {
-      const card = img.closest(".archive-card");
-      const idx = Number(card?.dataset.index);
-      const archive = state.filteredArchives[idx];
-      const kind = archive ? archiveDisplayKind(archive) : "other";
-      img.parentElement.innerHTML = `<div class="archive-thumb-fallback">${KIND_ICONS[kind] || ARCHIVE_ICON_INLINE}</div>`;
-    });
-  });
   grid.querySelectorAll(".archive-card").forEach((card) => {
     card.addEventListener("click", () => {
       const archive = state.filteredArchives[Number(card.dataset.index)];
