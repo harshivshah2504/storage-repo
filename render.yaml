@@ -52,13 +52,13 @@ services:
       - key: GITHUB_DRIVE_DB_MAX_CONNECTIONS
         value: "4"
       - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL
-        value: "1"
+        value: "4"
       - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER
-        value: "1"
+        value: "3"
       - key: GITHUB_DRIVE_MAX_ACTIVE_UPLOADS_PER_USER
-        value: "1"
+        value: "3"
       - key: GITHUB_DRIVE_MAX_ACTIVE_DOWNLOADS_PER_USER
-        value: "1"
+        value: "2"
       - key: GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS
         value: "30"
       - key: GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS
