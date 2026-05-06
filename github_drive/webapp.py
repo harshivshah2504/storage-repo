@@ -787,6 +787,7 @@ def create_app() -> Flask:
     @app.get("/api/tasks/<task_id>")
     @login_required
     def task(task_id: str):
+        _repair_orphaned_tasks(g.user_id)
         task_data = _get_task(task_id, g.user_id)
         if task_data is None:
             return jsonify({"error": "Task not found"}), 404
