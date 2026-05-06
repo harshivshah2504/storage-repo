@@ -15,7 +15,7 @@ import warnings
 import zipfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import urlencode
 
 from flask import (
@@ -72,7 +72,12 @@ _DOWNLOAD_LOCK = threading.Lock()
 _TASK_QUEUE: List[Dict[str, Any]] = []
 _TASK_QUEUE_COND = threading.Condition()
 _TASK_ACTIVE_RUNNERS = 0
+_TASK_ACTIVE_IDS: Set[str] = set()
 _TASK_DISPATCHER_STARTED = False
+_TASK_ORPHAN_GRACE_SECONDS = max(
+    10.0,
+    float(os.environ.get("GITHUB_DRIVE_TASK_ORPHAN_GRACE_SECONDS", "30")),
+)
 
 
 def create_app() -> Flask:
@@ -1195,6 +1200,7 @@ def _get_task(task_id: str, user_id: str) -> Optional[Dict]:
 
 
 def _list_tasks(user_id: str) -> List[Dict]:
+    _repair_orphaned_tasks(user_id)
     persisted: List[Dict[str, Any]] = []
     db_busy = False
     try:
@@ -1437,12 +1443,22 @@ def _limit_user_action(bucket: str, user_id: str) -> None:
     )
 
 
+def _active_task_count(user_id: str, task_type: Optional[str] = None) -> int:
+    tasks = _list_tasks(user_id)
+    return sum(
+        1
+        for task in tasks
+        if task.get("status") in {"queued", "running"}
+        and (task_type is None or task.get("type") == task_type)
+    )
+
+
 def _enforce_active_task_limit(user_id: str, task_type: str) -> None:
     max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 1)
-    if max_active > 0 and task_store.count_active_tasks(user_id) >= max_active:
+    if max_active > 0 and _active_task_count(user_id) >= max_active:
         raise RateLimitExceeded(f"You already have {max_active} active transfer(s). Wait for one to finish first.")
     per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", 1)
-    if per_type > 0 and task_store.count_active_tasks(user_id, task_type=task_type) >= per_type:
+    if per_type > 0 and _active_task_count(user_id, task_type=task_type) >= per_type:
         raise RateLimitExceeded(f"You already have {per_type} active {task_type} task(s).")
 
 
@@ -1608,6 +1624,45 @@ def _global_active_task_limit() -> int:
     return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 1)
 
 
+def _queued_task_ids() -> Set[str]:
+    with _TASK_QUEUE_COND:
+        return {str(item.get("task_id") or "") for item in _TASK_QUEUE if item.get("task_id")}
+
+
+def _running_task_ids() -> Set[str]:
+    with _TASK_QUEUE_COND:
+        return set(_TASK_ACTIVE_IDS)
+
+
+def _repair_orphaned_tasks(user_id: str) -> None:
+    now = time.time()
+    try:
+        tasks = task_store.list_tasks(user_id, limit=100)
+    except Exception:
+        return
+    queued_ids = _queued_task_ids()
+    running_ids = _running_task_ids()
+    for task in tasks:
+        status = str(task.get("status") or "")
+        if status not in {"queued", "running"}:
+            continue
+        age = now - float(task.get("created_at") or 0.0)
+        if age < _TASK_ORPHAN_GRACE_SECONDS:
+            continue
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            continue
+        if status == "queued" and task_id in queued_ids:
+            continue
+        if status == "running" and task_id in running_ids:
+            continue
+        _update_task(
+            task_id,
+            status="failed",
+            error="This transfer was stuck in the server queue and has been cleared. Please retry.",
+        )
+
+
 def _ensure_task_dispatcher() -> None:
     global _TASK_DISPATCHER_STARTED
     with _TASK_QUEUE_COND:
@@ -1636,13 +1691,16 @@ def _task_dispatcher_loop() -> None:
 def _launch_task_runner(task_id: str, runner, counted: bool) -> None:
     def invoke() -> None:
         global _TASK_ACTIVE_RUNNERS
+        with _TASK_QUEUE_COND:
+            _TASK_ACTIVE_IDS.add(task_id)
         try:
             runner(task_id)
         finally:
-            if counted:
-                with _TASK_QUEUE_COND:
+            with _TASK_QUEUE_COND:
+                _TASK_ACTIVE_IDS.discard(task_id)
+                if counted:
                     _TASK_ACTIVE_RUNNERS = max(0, _TASK_ACTIVE_RUNNERS - 1)
-                    _TASK_QUEUE_COND.notify_all()
+                _TASK_QUEUE_COND.notify_all()
 
     thread = threading.Thread(target=invoke, daemon=True, name=f"github-drive-task-{task_id}")
     thread.start()
