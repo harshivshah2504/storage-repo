@@ -1536,6 +1536,10 @@ async function uploadFileGroup(group, uploadForm) {
     error.status = response.status;
     throw error;
   }
+  // Refresh the transfer list right away so the new task appears without
+  // waiting for the next poll tick (it was previously sitting on "queued"
+  // for up to 1.5s before the UI even saw it had moved to "running").
+  loadTasks().catch(() => {});
   return payload;
 }
 
