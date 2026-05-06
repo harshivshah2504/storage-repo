@@ -1323,6 +1323,7 @@ def _start_task_thread(task_id: str, runner) -> None:
     if max_active <= 0:
         # No global cap: this task will run immediately, so skip the visible
         # "queued" state and reflect that in the task row before we return.
+        LOG.info("starting task %s uncapped (no global limit)", task_id)
         _update_task(task_id, status="running")
         _launch_task_runner(task_id, runner, counted=False)
         return
@@ -1336,13 +1337,26 @@ def _start_task_thread(task_id: str, runner) -> None:
         if not _TASK_QUEUE and _TASK_ACTIVE_RUNNERS < max_active:
             _TASK_ACTIVE_RUNNERS += 1
             launch_now = True
+            active_after = _TASK_ACTIVE_RUNNERS
+            queue_depth = len(_TASK_QUEUE)
         else:
             _TASK_QUEUE.append({"task_id": task_id, "runner": runner})
             _TASK_QUEUE_COND.notify_all()
             launch_now = False
+            active_after = _TASK_ACTIVE_RUNNERS
+            queue_depth = len(_TASK_QUEUE)
     if launch_now:
+        LOG.info(
+            "fast-path task %s (active=%s/%s queue=%s)",
+            task_id, active_after, max_active, queue_depth,
+        )
         _update_task(task_id, status="running")
         _launch_task_runner(task_id, runner, counted=True)
+    else:
+        LOG.info(
+            "queued task %s (active=%s/%s queue=%s)",
+            task_id, active_after, max_active, queue_depth,
+        )
 
 
 def _get_task_internal(task_id: str) -> Optional[Dict]:
@@ -1633,10 +1647,17 @@ def _active_task_count(user_id: str, task_type: Optional[str] = None) -> int:
 
 
 def _enforce_active_task_limit(user_id: str, task_type: str) -> None:
-    max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 1)
+    # Defaults assume the 512 MB Render free tier with the streaming/no-PIL
+    # changes already applied. Tighter values can still be set via env vars
+    # if you're running on a smaller box. Keeping the default at 1 (the old
+    # value) silently broke parallel uploads when render.yaml env-var sync
+    # didn't apply, so the safer policy is "parallel by default, restrict
+    # via env vars if needed".
+    max_active = env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER", 3)
     if max_active > 0 and _active_task_count(user_id) >= max_active:
         raise RateLimitExceeded(f"You already have {max_active} active transfer(s). Wait for one to finish first.")
-    per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", 1)
+    per_type_default = 3 if task_type == "upload" else (2 if task_type == "download" else 3)
+    per_type = env_int(f"GITHUB_DRIVE_MAX_ACTIVE_{task_type.upper()}S_PER_USER", per_type_default)
     if per_type > 0 and _active_task_count(user_id, task_type=task_type) >= per_type:
         raise RateLimitExceeded(f"You already have {per_type} active {task_type} task(s).")
 
@@ -1800,7 +1821,11 @@ def _client_ip() -> str:
 
 
 def _global_active_task_limit() -> int:
-    return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 1)
+    # Default raised from 1 → 4 so parallel uploads work out-of-the-box on
+    # the 512 MB Render free tier even when render.yaml env-var sync hasn't
+    # propagated. Override with a smaller value via the env var if running
+    # on a more memory-constrained host.
+    return env_int("GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL", 4)
 
 
 def _queued_task_ids() -> Set[str]:
