@@ -1700,12 +1700,18 @@ def _repair_orphaned_tasks(user_id: str) -> None:
         if status not in {"queued", "running"}:
             continue
         payload = task.get("payload") or {}
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            continue
+        if status == "queued" and task_id not in queued_ids:
+            message = "This transfer was stuck in the server queue and has been cleared. Please retry."
+            if payload.get("browser_direct_upload"):
+                message = "This direct browser upload never started on the server. Please retry."
+            _update_task(task_id, status="failed", error=message)
+            continue
         age = now - float(task.get("created_at") or 0.0)
         grace = 5.0 if payload.get("browser_direct_upload") and status == "queued" else _TASK_ORPHAN_GRACE_SECONDS
         if age < grace:
-            continue
-        task_id = str(task.get("id") or "")
-        if not task_id:
             continue
         if payload.get("browser_direct_upload") and status == "queued":
             _update_task(
