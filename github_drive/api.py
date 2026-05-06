@@ -90,7 +90,13 @@ class GitHubClient:
         )
 
     def _request_with_retries(self, operation_name: str, send: Callable[[], requests.Response]) -> requests.Response:
-        max_attempts = 6
+        # Fewer attempts and a tighter cap on per-attempt sleep: a single
+        # GitHub secondary-rate-limit response with `Retry-After: 600` would
+        # otherwise pin a runner thread to time.sleep for half an hour, which
+        # is what makes uploads appear "stuck" after a burst of activity.
+        # Better to surface the rate limit as a quick failure so the user can
+        # retry once GitHub recovers.
+        max_attempts = 3
         last_error: Optional[Exception] = None
         for attempt in range(1, max_attempts + 1):
             response: Optional[requests.Response] = None
@@ -134,11 +140,17 @@ class GitHubClient:
         response: Optional[requests.Response] = None,
         exc: Optional[Exception] = None,
     ) -> float:
+        # 30s is the longest we're willing to block a runner thread on a
+        # single retry. Anything longer surfaces as a failed task; the user
+        # can resubmit once GitHub clears the secondary rate limit. This
+        # keeps `_TASK_ACTIVE_RUNNERS` slots cycling instead of being held
+        # hostage by a sleep-bound runner.
+        max_single_sleep = 30.0
         if response is not None:
             retry_after = response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    return max(1.0, min(float(retry_after), 300.0))
+                    return max(1.0, min(float(retry_after), max_single_sleep))
                 except ValueError:
                     pass
             if response.headers.get("X-RateLimit-Remaining") == "0":
@@ -146,7 +158,7 @@ class GitHubClient:
                 if reset:
                     try:
                         wait = max(1.0, float(reset) - time.time())
-                        return min(wait, 300.0)
+                        return min(wait, max_single_sleep)
                     except ValueError:
                         pass
             body = (response.text or "").lower()

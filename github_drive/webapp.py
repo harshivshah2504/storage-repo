@@ -1350,8 +1350,22 @@ def _start_task_thread(task_id: str, runner) -> None:
             "fast-path task %s (active=%s/%s queue=%s)",
             task_id, active_after, max_active, queue_depth,
         )
-        _update_task(task_id, status="running")
-        _launch_task_runner(task_id, runner, counted=True)
+        # Pair the counter increment above with a guaranteed release path:
+        # if either the status update or the thread launch raises, the slot
+        # would otherwise be permanently consumed and parallelism would
+        # silently degrade after enough sporadic failures.
+        try:
+            _update_task(task_id, status="running")
+            _launch_task_runner(task_id, runner, counted=True)
+        except Exception as exc:
+            LOG.exception("fast-path launch failed for %s; releasing slot", task_id)
+            with _TASK_QUEUE_COND:
+                _TASK_ACTIVE_RUNNERS = max(0, _TASK_ACTIVE_RUNNERS - 1)
+                _TASK_QUEUE_COND.notify_all()
+            try:
+                _update_task(task_id, status="failed", error=f"Failed to start runner: {exc}")
+            except Exception:
+                pass
     else:
         LOG.info(
             "queued task %s (active=%s/%s queue=%s)",
@@ -1912,8 +1926,28 @@ def _task_dispatcher_loop() -> None:
                 _TASK_ACTIVE_RUNNERS,
                 len(_TASK_QUEUE),
             )
-            _update_task(queued["task_id"], status="running")
-            _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
+            try:
+                _update_task(queued["task_id"], status="running")
+                _launch_task_runner(queued["task_id"], queued["runner"], counted=True)
+            except Exception:
+                # Mirror the fast-path leak fix: an exception between the
+                # counter increment and the runner thread launch must not
+                # permanently consume a slot.
+                LOG.exception(
+                    "dispatcher launch failed for %s; releasing slot",
+                    queued.get("task_id"),
+                )
+                with _TASK_QUEUE_COND:
+                    _TASK_ACTIVE_RUNNERS = max(0, _TASK_ACTIVE_RUNNERS - 1)
+                    _TASK_QUEUE_COND.notify_all()
+                try:
+                    _update_task(
+                        queued["task_id"],
+                        status="failed",
+                        error="Dispatcher failed to launch runner",
+                    )
+                except Exception:
+                    pass
         except Exception:
             LOG.exception("task dispatcher iteration failed; continuing")
 
