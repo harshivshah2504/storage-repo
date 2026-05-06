@@ -894,8 +894,7 @@ def create_app() -> Flask:
                     "browser_display_name": Path(relative_path).name or "Upload",
                     "browser_direct_upload": True,
                 }
-                task_id = _create_task("upload", g.user_id, payload)
-                _update_task(task_id, status="running")
+                task_id = _create_task("upload", g.user_id, payload, initial_status="running")
                 try:
                     client = _user_client(g.user_id)
                     result = upload_browser_single_file(
@@ -1186,13 +1185,13 @@ def _run_download_task(task_id: str) -> None:
 # ── task helpers (per-user scoped) ────────────────────────────────────────────
 
 
-def _create_task(task_type: str, user_id: str, payload: Dict[str, Any]) -> str:
+def _create_task(task_type: str, user_id: str, payload: Dict[str, Any], initial_status: str = "queued") -> str:
     task_id = uuid.uuid4().hex[:12]
     task = {
         "id": task_id,
         "type": task_type,
         "user_id": user_id,
-        "status": "queued",
+        "status": initial_status,
         "created_at": time.time(),
         "updated_at": time.time(),
         "payload": payload,
@@ -1700,11 +1699,20 @@ def _repair_orphaned_tasks(user_id: str) -> None:
         status = str(task.get("status") or "")
         if status not in {"queued", "running"}:
             continue
+        payload = task.get("payload") or {}
         age = now - float(task.get("created_at") or 0.0)
-        if age < _TASK_ORPHAN_GRACE_SECONDS:
+        grace = 5.0 if payload.get("browser_direct_upload") and status == "queued" else _TASK_ORPHAN_GRACE_SECONDS
+        if age < grace:
             continue
         task_id = str(task.get("id") or "")
         if not task_id:
+            continue
+        if payload.get("browser_direct_upload") and status == "queued":
+            _update_task(
+                task_id,
+                status="failed",
+                error="This direct browser upload never started on the server. Please retry.",
+            )
             continue
         if status == "queued" and task_id in queued_ids:
             continue
