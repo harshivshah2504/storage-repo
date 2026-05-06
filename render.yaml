@@ -8,7 +8,7 @@ services:
     name: github-drive
     runtime: python
     buildCommand: pip install -r requirements.txt && pip install -e .
-    startCommand: gunicorn "github_drive.webapp:create_app()" --bind "0.0.0.0:$PORT" --workers 1 --threads 4 --timeout 600
+    startCommand: gunicorn "github_drive.webapp:create_app()" --bind "0.0.0.0:$PORT" --workers 1 --threads 3 --timeout 600
     healthCheckPath: /healthz
     envVars:
       - key: GITHUB_DRIVE_SESSION_SECRET
@@ -52,13 +52,13 @@ services:
       - key: GITHUB_DRIVE_DB_MAX_CONNECTIONS
         value: "4"
       - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_GLOBAL
-        value: "4"
+        value: "3"
       - key: GITHUB_DRIVE_MAX_ACTIVE_TASKS_PER_USER
-        value: "3"
-      - key: GITHUB_DRIVE_MAX_ACTIVE_UPLOADS_PER_USER
-        value: "3"
-      - key: GITHUB_DRIVE_MAX_ACTIVE_DOWNLOADS_PER_USER
         value: "2"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_UPLOADS_PER_USER
+        value: "2"
+      - key: GITHUB_DRIVE_MAX_ACTIVE_DOWNLOADS_PER_USER
+        value: "1"
       - key: GITHUB_DRIVE_RELEASES_CACHE_TTL_SECONDS
         value: "30"
       - key: GITHUB_DRIVE_RELEASE_CACHE_TTL_SECONDS
