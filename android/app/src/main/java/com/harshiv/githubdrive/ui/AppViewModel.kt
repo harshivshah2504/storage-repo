@@ -23,6 +23,7 @@ import com.harshiv.githubdrive.github.GitHubClient
 import com.harshiv.githubdrive.transfer.TransferManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -74,6 +75,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var signInJob: Job? = null
 
+    /** A granted token whose account setup has not finished yet. Survives a failed setup attempt. */
+    private var pendingToken: String? = null
+
     private var cachedClient: GitHubClient? = null
     private var cachedToken: String? = null
 
@@ -110,18 +114,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
         signInJob = viewModelScope.launch {
             try {
-                signInPhase = SignInPhase.Preparing("Asking GitHub for a sign-in code...")
-                val codes = DeviceFlow.requestCodes(clientId)
-                signInPhase = SignInPhase.AwaitingApproval(codes)
-
-                val token = DeviceFlow.awaitToken(clientId, codes)
+                // A token GitHub already granted is not thrown away by a flaky hand-off: if setup
+                // failed last time, "Try again" resumes from here instead of asking for a new code.
+                val token = pendingToken ?: run {
+                    signInPhase = SignInPhase.Preparing("Asking GitHub for a sign-in code...")
+                    val codes = DeviceFlow.requestCodes(clientId)
+                    signInPhase = SignInPhase.AwaitingApproval(codes)
+                    DeviceFlow.awaitToken(clientId, codes).also { pendingToken = it }
+                }
 
                 signInPhase = SignInPhase.Finishing("Setting up your storage...")
                 val probe = GitHubClient(token)
-                val user = probe.viewerLogin()
+                val user = whileNetworkReturns { probe.viewerLogin() }
                 probe.owner = user
                 probe.repo = prefs.repoName
-                probe.ensureRepo(private = true)
+                whileNetworkReturns { probe.ensureRepo(private = true) }
 
                 // Generating the Keystore key can take a few hundred milliseconds.
                 withContext(Dispatchers.IO) {
@@ -132,6 +139,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 cachedClient = null
                 cachedToken = null
 
+                pendingToken = null
                 login = user
                 signedIn = true
                 signInPhase = SignInPhase.Idle
@@ -145,7 +153,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelSignIn() {
         signInJob?.cancel()
         signInJob = null
+        pendingToken = null
         signInPhase = SignInPhase.Idle
+    }
+
+    /**
+     * Retries through dropped connections.
+     *
+     * These calls run in the seconds right after the browser hands control back, which is exactly
+     * when Samsung and Xiaomi still have the app frozen and its network blocked. GitHub has already
+     * granted the token by then, so an IOException here means "wait for the network to come back",
+     * not "sign-in failed". HTTP errors are [GitHubException], not [java.io.IOException], so a 401
+     * or a 403 still fails immediately.
+     */
+    private suspend fun <T> whileNetworkReturns(attempts: Int = 6, block: suspend () -> T): T {
+        var last: java.io.IOException? = null
+        repeat(attempts) { attempt ->
+            try {
+                return block()
+            } catch (e: java.io.IOException) {
+                last = e
+                delay(2000L * (attempt + 1))
+            }
+        }
+        throw last ?: java.io.IOException("The network did not come back.")
     }
 
     fun signOut() {
