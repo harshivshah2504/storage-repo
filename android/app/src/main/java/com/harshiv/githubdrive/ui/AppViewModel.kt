@@ -278,8 +278,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setBrowseView(view: BrowseView) {
-        browseView = view
+    fun toggleBrowseView() {
+        browseView = if (browseView == BrowseView.LIST) BrowseView.TILE else BrowseView.LIST
     }
 
     /** Fetches and caches the thumbnail for one image inside an archive, once. */

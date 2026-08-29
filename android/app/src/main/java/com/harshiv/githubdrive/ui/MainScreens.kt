@@ -147,7 +147,7 @@ fun ArchivesScreen(
                 EmptyState(
                     icon = Icons.Filled.Inbox,
                     title = "Nothing stored yet",
-                    subtitle = "Tap Upload to put your first files into your GitHub account."
+                    subtitle = "Tap Upload to put your first files into your storage."
                 )
             } else {
                 LazyVerticalGrid(
@@ -184,7 +184,7 @@ fun ArchivesScreen(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Delete this archive?") },
             text = {
-                Text("\"${target.sourceName}\" and all ${target.totalItems} files in it will be removed from your GitHub repository. This cannot be undone.")
+                Text("\"${target.sourceName}\" and all ${target.totalItems} files in it will be removed from your storage. This cannot be undone.")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -295,9 +295,7 @@ fun BrowseScreen(
                 },
                 actions = {
                     val tiled = vm.browseView == BrowseView.TILE
-                    IconButton(
-                        onClick = { vm.setBrowseView(if (tiled) BrowseView.LIST else BrowseView.TILE) }
-                    ) {
+                    IconButton(onClick = { vm.toggleBrowseView() }) {
                         Icon(
                             if (tiled) Icons.AutoMirrored.Filled.ViewList else Icons.Filled.GridView,
                             contentDescription = if (tiled) "Show as a list" else "Show as tiles"
@@ -579,8 +577,8 @@ fun SettingsScreen(
             )
             HorizontalDivider()
             ListItem(
-                headlineContent = { Text("Storage repository") },
-                supportingContent = { Text("${login ?: "you"}/$repoName (private)") },
+                headlineContent = { Text("Your storage") },
+                supportingContent = { Text("$repoName - private, only you can see it") },
                 trailingContent = {
                     Icon(Icons.Filled.OpenInNew, contentDescription = null)
                 },
@@ -594,8 +592,8 @@ fun SettingsScreen(
             )
             HorizontalDivider()
             Text(
-                "Your files are stored as release assets in your own private repository. " +
-                    "This app talks to GitHub directly - nothing is uploaded to any other server.",
+                "Your files live in private storage that belongs to you. This app talks to it " +
+                    "directly - nothing is uploaded to any other server, and nobody else can see it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(16.dp)
@@ -615,7 +613,7 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { confirmSignOut = false },
             title = { Text("Sign out?") },
-            text = { Text("Your files stay in your GitHub account. You will need to approve a new sign-in code to get back in.") },
+            text = { Text("Your files stay where they are - nothing is deleted. You will need to approve a new sign-in code to get back in.") },
             confirmButton = {
                 TextButton(onClick = { confirmSignOut = false; onSignOut() }) { Text("Sign out") }
             },

@@ -1,10 +1,10 @@
 <!--
-  Three panels folded into a triangle: the drive mark, drawn as one solid black shape.
-  Sized to sit inside the adaptive-icon safe zone, and reused in the app as ic_drive.
+  The same mark as the launcher icon, at icon size, so the app shows the logo rather than a stock
+  cloud. Compose tints it at the call site: solid black would disappear on a dark theme.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
+    android:width="24dp"
+    android:height="24dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
