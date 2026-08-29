@@ -73,6 +73,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Cover bytes keyed by release id; null means "looked and there wasn't one". */
     val covers = mutableStateMapOf<Long, ByteArray?>()
 
+    /** Archives already opened this session, so reopening one is instant. */
+    private val details = HashMap<Long, ArchiveDetail>()
+
     private var signInJob: Job? = null
 
     /** A granted token whose account setup has not finished yet. Survives a failed setup attempt. */
@@ -197,6 +200,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshArchives() {
         val repo = repo() ?: return
+        details.clear()
         page = 1
         archivesLoading = true
         archivesError = null
@@ -241,23 +245,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         val repo = repo() ?: return
         covers[summary.releaseId] = null
+        val coverId = summary.coverAsset?.id
         viewModelScope.launch {
-            val bytes = withContext(Dispatchers.IO) { repo.coverBytes(summary.releaseId) }
+            val bytes = withContext(Dispatchers.IO) {
+                // The listing already told us the asset id; only a summary that arrived without
+                // its assets has to go and look it up.
+                if (coverId != null) repo.assetBytes(coverId) else repo.coverBytes(summary.releaseId)
+            }
             if (bytes != null) covers[summary.releaseId] = bytes
         }
     }
 
+    /**
+     * Opening an archive shows whatever was loaded last time straight away, so going back and
+     * forth between the grid and a folder costs nothing after the first visit. [refreshArchives]
+     * and any upload or delete clear it.
+     */
     fun openArchive(summary: ArchiveSummary) {
         val repo = repo() ?: return
-        detail = null
+        val remembered = details[summary.releaseId]
+        detail = remembered
         currentPath = ""
-        detailLoading = true
         detailError = null
+        detailLoading = remembered == null
         viewModelScope.launch {
             try {
-                detail = repo.loadDetail(summary.releaseId)
+                val loaded = repo.loadDetail(summary)
+                details[summary.releaseId] = loaded
+                detail = loaded
             } catch (e: Exception) {
-                detailError = friendly(e)
+                if (remembered == null) detailError = friendly(e)
             } finally {
                 detailLoading = false
             }
@@ -282,6 +299,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 repo.deleteArchive(summary)
                 archives = archives.filterNot { it.releaseId == summary.releaseId }
                 covers.remove(summary.releaseId)
+                details.remove(summary.releaseId)
                 banner = "Deleted ${summary.sourceName}"
             } catch (e: Exception) {
                 banner = friendly(e)
