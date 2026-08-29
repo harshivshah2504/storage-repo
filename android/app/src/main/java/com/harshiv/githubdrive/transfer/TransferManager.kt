@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 
 enum class TransferKind { UPLOAD, DOWNLOAD }
@@ -48,6 +50,13 @@ data class Transfer(
 object TransferManager {
 
     private val scope = CoroutineScope(SupervisorJob())
+
+    /**
+     * Uploads run one at a time. Picking twenty files now starts twenty uploads, and twenty
+     * concurrent release creations and asset streams earn a secondary rate limit from GitHub and
+     * saturate a phone's uplink. Queued transfers stay cancellable while they wait.
+     */
+    private val uploadGate = Mutex()
     private val nextId = AtomicLong(1L)
     private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
@@ -81,15 +90,18 @@ object TransferManager {
 
         val job = scope.launch {
             try {
-                uploader.upload(sourceName, items, virtualFolders) { progress ->
-                    update(id) {
-                        it.copy(
-                            bytesDone = progress.bytesSent,
-                            bytesTotal = progress.totalBytes,
-                            itemsDone = progress.completedItems,
-                            itemsTotal = progress.totalItems,
-                            detail = progress.currentName.ifEmpty { it.detail }
-                        )
+                if (uploadGate.isLocked) update(id) { it.copy(detail = "Waiting its turn") }
+                uploadGate.withLock {
+                    uploader.upload(sourceName, items, virtualFolders) { progress ->
+                        update(id) {
+                            it.copy(
+                                bytesDone = progress.bytesSent,
+                                bytesTotal = progress.totalBytes,
+                                itemsDone = progress.completedItems,
+                                itemsTotal = progress.totalItems,
+                                detail = progress.currentName.ifEmpty { it.detail }
+                            )
+                        }
                     }
                 }
                 update(id) { it.copy(state = TransferState.DONE, bytesDone = it.bytesTotal, detail = "Uploaded") }

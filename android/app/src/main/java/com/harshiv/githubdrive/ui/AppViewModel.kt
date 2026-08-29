@@ -291,6 +291,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------ transfers
 
+    /**
+     * Picked files become one archive each.
+     *
+     * Bundling a multi-select into a single release made the drive show a folder the person never
+     * created - `source_type` came out as `directory` and the card drew a folder thumbnail. A
+     * folder should only appear when they actually picked one, so a five-file selection is five
+     * archives. [TransferManager] runs them one at a time.
+     */
     fun uploadFiles(uris: List<Uri>) {
         val uploader = uploader() ?: return
         if (uris.isEmpty()) return
@@ -300,8 +308,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 banner = "Nothing to upload."
                 return@launch
             }
-            val name = if (items.size == 1) items[0].relativePath else "${items.size} files"
-            startUpload(uploader, name, items, emptyList())
+            for (item in items) {
+                startUpload(uploader, item.relativePath, listOf(item), emptyList())
+            }
+            if (items.size > 1) banner = "Uploading ${items.size} files"
         }
     }
 
