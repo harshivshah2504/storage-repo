@@ -36,13 +36,7 @@ object DeviceFlow {
         val verificationUri: String,
         val expiresInSeconds: Int,
         val intervalSeconds: Int
-    ) {
-        /**
-         * GitHub accepts the code as a query parameter, which spares a non-technical person from
-         * typing it. The plain [verificationUri] stays available as the fallback.
-         */
-        val prefilledUri: String get() = "$verificationUri?user_code=$userCode"
-    }
+    )
 
     sealed interface PollResult {
         data class Success(val accessToken: String) : PollResult
@@ -93,20 +87,27 @@ object DeviceFlow {
             .header("User-Agent", "github-drive")
             .post(form)
             .build()
-        http.newCall(request).execute().use { response ->
-            val json = runCatching { JSONObject(response.body?.string().orEmpty()) }
-                .getOrElse { return@use PollResult.Failed("bad_response", "GitHub sent an unreadable reply.") }
+        try {
+            http.newCall(request).execute().use { response ->
+                val json = runCatching { JSONObject(response.body?.string().orEmpty()) }
+                    .getOrElse { return@use PollResult.Pending }
 
-            json.optString("access_token").takeIf { it.isNotEmpty() }?.let {
-                return@use PollResult.Success(it)
-            }
+                json.optString("access_token").takeIf { it.isNotEmpty() }?.let {
+                    return@use PollResult.Success(it)
+                }
 
-            when (val error = json.optString("error")) {
-                "authorization_pending" -> PollResult.Pending
-                "slow_down" -> PollResult.SlowDown(json.optInt("interval", 10))
-                "" -> PollResult.Failed("unknown", "GitHub sent no token and no error.")
-                else -> PollResult.Failed(error, json.optString("error_description", error))
+                when (val error = json.optString("error")) {
+                    "authorization_pending" -> PollResult.Pending
+                    "slow_down" -> PollResult.SlowDown(json.optInt("interval", 10))
+                    "" -> PollResult.Pending
+                    else -> PollResult.Failed(error, json.optString("error_description", error))
+                }
             }
+        } catch (e: java.io.IOException) {
+            // Samsung/Xiaomi freeze a backgrounded app and cut its network (netd: isBlocked=true).
+            // Sign-in inherently backgrounds us while the user authorizes, so a dead poll means
+            // "not right now", never "sign-in failed". We keep trying until the code expires.
+            PollResult.Pending
         }
     }
 

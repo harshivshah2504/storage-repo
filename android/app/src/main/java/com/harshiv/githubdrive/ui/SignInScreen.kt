@@ -48,8 +48,9 @@ import androidx.compose.ui.unit.sp
 /**
  * Device-flow sign-in, written for someone who has never used GitHub.
  *
- * The code is copied to the clipboard the moment it appears and the GitHub link is pre-filled with
- * it, so in the normal case there is nothing to type at all - tap, approve, done.
+ * The code is copied to the clipboard the moment it appears, so approving it is a paste rather than
+ * a transcription. The link is the plain verification URL GitHub documents - passing the code as a
+ * query parameter sends GitHub straight to /device/failure.
  */
 @Composable
 fun SignInScreen(
@@ -125,7 +126,7 @@ fun SignInScreen(
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            "Copied. GitHub should fill it in for you.",
+                            "Copied. Paste it on the GitHub page.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -135,7 +136,7 @@ fun SignInScreen(
                 Spacer(Modifier.height(20.dp))
 
                 Button(
-                    onClick = { openUrl(context, phase.codes.prefilledUri) },
+                    onClick = { openUrl(context, phase.codes.verificationUri) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -202,8 +203,8 @@ private fun Steps() {
     ) {
         Step(1, "Tap the button above. GitHub opens in your browser.")
         Step(2, "Sign in to GitHub if it asks.")
-        Step(3, "Check the code matches, then tap Continue and Authorize.")
-        Step(4, "Come back here. This screen moves on by itself.")
+        Step(3, "Long-press the box and paste the code, then tap Continue.")
+        Step(4, "Tap Authorize, then come back here. This screen moves on by itself.")
     }
 }
 

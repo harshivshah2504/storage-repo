@@ -137,7 +137,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 signInPhase = SignInPhase.Idle
                 refreshArchives()
             } catch (e: Exception) {
-                signInPhase = SignInPhase.Failed(e.message ?: "Sign-in failed.")
+                signInPhase = SignInPhase.Failed(friendly(e))
             }
         }
     }
@@ -307,6 +307,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun friendly(e: Exception): String {
+        // A dropped connection surfaces as an OkHttp/DNS exception whose message is a bare hostname.
+        if (e is java.io.IOException) return "No internet connection. Check your Wi-Fi and try again."
         val message = e.message ?: "Something went wrong."
         return when {
             message.contains("401") -> "GitHub rejected the sign-in. Sign out and sign in again."
