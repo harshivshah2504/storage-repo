@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.net.Uri
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -34,20 +35,44 @@ object Cover {
             val decoded = context.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, options)
             }
-            decoded?.let { bitmap ->
-                val oriented = applyExif(context, uri, bitmap)
-                val square = centreCrop(oriented)
-                val scaled = Bitmap.createScaledBitmap(square, SIZE, SIZE, true)
-                val out = ByteArrayOutputStream()
-                scaled.compress(Bitmap.CompressFormat.JPEG, QUALITY, out)
-                if (scaled != square) square.recycle()
-                if (oriented != bitmap) bitmap.recycle()
-                out.toByteArray()
-            }
+            decoded?.let { bitmap -> squareJpeg(applyExif(context, uri, bitmap), bitmap) }
         }
     } catch (e: Throwable) {
         // A cover is cosmetic; never fail an upload over it.
         null
+    }
+
+    /**
+     * The same 480x480 JPEG from bytes already in hand, for thumbnailing a stored image the app
+     * has just downloaded. Kept here so a thumbnail inside an archive looks like the cover on it.
+     */
+    fun buildJpeg(bytes: ByteArray): ByteArray? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight)
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { bitmap ->
+                squareJpeg(applyExif(bytes, bitmap), bitmap)
+            }
+        }
+    } catch (e: Throwable) {
+        null
+    }
+
+    /** Centre-crops [oriented] to a [SIZE] square JPEG, recycling whatever it replaced. */
+    private fun squareJpeg(oriented: Bitmap, source: Bitmap): ByteArray {
+        val square = centreCrop(oriented)
+        val scaled = Bitmap.createScaledBitmap(square, SIZE, SIZE, true)
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, QUALITY, out)
+        if (scaled != square) square.recycle()
+        if (oriented != source) source.recycle()
+        return out.toByteArray()
     }
 
     private fun sampleSizeFor(width: Int, height: Int): Int {
@@ -72,20 +97,33 @@ object Cover {
                 ExifInterface.ORIENTATION_NORMAL
             )
         } ?: ExifInterface.ORIENTATION_NORMAL
-
-        val degrees = when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-            else -> 0f
-        }
-        if (degrees == 0f) {
-            bitmap
-        } else {
-            val matrix = android.graphics.Matrix().apply { postRotate(degrees) }
-            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        }
+        rotate(bitmap, degreesFor(orientation))
     } catch (e: Throwable) {
         bitmap
+    }
+
+    private fun applyExif(bytes: ByteArray, bitmap: Bitmap): Bitmap = try {
+        val orientation = ByteArrayInputStream(bytes).use { input ->
+            ExifInterface(input).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        }
+        rotate(bitmap, degreesFor(orientation))
+    } catch (e: Throwable) {
+        bitmap
+    }
+
+    private fun degreesFor(orientation: Int): Float = when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+        ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+        ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+        else -> 0f
+    }
+
+    private fun rotate(bitmap: Bitmap, degrees: Float): Bitmap {
+        if (degrees == 0f) return bitmap
+        val matrix = android.graphics.Matrix().apply { postRotate(degrees) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 }

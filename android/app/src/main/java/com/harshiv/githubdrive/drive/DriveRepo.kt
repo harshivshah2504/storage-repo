@@ -225,6 +225,39 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
     suspend fun assetBytes(assetId: Long): ByteArray? =
         runCatching { client.downloadAssetBytes(assetId) }.getOrNull()
 
+    /**
+     * A square thumbnail for one image inside an archive.
+     *
+     * Release assets have no thumbnail service, so the only way to show a picture is to fetch it
+     * and shrink it here. That is worth doing once and never again: the 480px JPEG is kept in the
+     * cache directory, so scrolling back through a folder costs nothing. Anything that is not a
+     * plain, reasonably sized, unencrypted image is skipped rather than downloaded on spec.
+     */
+    suspend fun thumbnail(entry: ArchiveEntry): ByteArray? = withContext(Dispatchers.IO) {
+        if (entry.encrypted || entry.isFolder) return@withContext null
+        if (entry.kind != "image") return@withContext null
+        if (entry.memberOf != null) return@withContext null
+        val part = entry.parts.singleOrNull() ?: return@withContext null
+        if (part.size > THUMB_SOURCE_MAX_BYTES) return@withContext null
+
+        val cached = File(cacheDir, "thumb-${part.assetId}.jpg")
+        if (cached.exists() && cached.length() > 0L) {
+            return@withContext runCatching { cached.readBytes() }.getOrNull()
+        }
+
+        val source = runCatching { client.downloadAssetBytes(part.assetId) }.getOrNull()
+            ?: return@withContext null
+        val thumb = Cover.buildJpeg(source) ?: return@withContext null
+        runCatching { cached.writeBytes(thumb) }
+        thumb
+    }
+
+    fun clearThumbnailCache() {
+        cacheDir.listFiles()?.forEach { file ->
+            if (file.name.startsWith("thumb-")) file.delete()
+        }
+    }
+
     /** Cover for an archive whose listing did not carry its assets. */
     suspend fun coverBytes(releaseId: Long): ByteArray? = try {
         val cover = client.listReleaseAssets(releaseId)
@@ -325,5 +358,13 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         cacheDir.listFiles()?.forEach { file ->
             if (file.name.startsWith("bundle-")) file.delete()
         }
+    }
+
+    companion object {
+        /**
+         * Above this, fetching the original just to shrink it costs more data than the picture is
+         * worth on a phone connection. The file is still listed and still downloadable in full.
+         */
+        private const val THUMB_SOURCE_MAX_BYTES = 40L * 1024L * 1024L
     }
 }

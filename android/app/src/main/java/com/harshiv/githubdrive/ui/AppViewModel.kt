@@ -25,7 +25,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+
+/** How the files inside an archive are laid out. */
+enum class BrowseView { LIST, TILE }
 
 sealed interface SignInPhase {
     data object Idle : SignInPhase
@@ -75,6 +80,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Archives already opened this session, so reopening one is instant. */
     private val details = HashMap<Long, ArchiveDetail>()
+
+    /** Thumbnail bytes keyed by asset id; null means "looked and there isn't one". */
+    val thumbs = mutableStateMapOf<Long, ByteArray?>()
+
+    /**
+     * Thumbnails mean downloading the picture itself, so only a few are ever in flight. Without
+     * this a folder of photos would open forty connections at once and stall the list it is
+     * decorating.
+     */
+    private val thumbGate = Semaphore(3)
+
+    var browseView by mutableStateOf(BrowseView.LIST)
+        private set
 
     private var signInJob: Job? = null
 
@@ -184,10 +202,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun signOut() {
         signInJob?.cancel()
+        // Before the token goes, while there is still a client to build a repo from.
+        repo()?.clearThumbnailCache()
         prefs.clear()
         cachedClient = null
         cachedToken = null
         covers.clear()
+        thumbs.clear()
+        details.clear()
         archives = emptyList()
         detail = null
         signedIn = false
@@ -255,6 +277,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (bytes != null) covers[summary.releaseId] = bytes
         }
     }
+
+    fun setBrowseView(view: BrowseView) {
+        browseView = view
+    }
+
+    /** Fetches and caches the thumbnail for one image inside an archive, once. */
+    fun loadThumb(entry: ArchiveEntry) {
+        val assetId = entry.parts.singleOrNull()?.assetId ?: return
+        if (thumbs.containsKey(assetId)) return
+        val repo = repo() ?: return
+        thumbs[assetId] = null
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) { thumbGate.withPermit { repo.thumbnail(entry) } }
+            if (bytes != null) thumbs[assetId] = bytes
+        }
+    }
+
+    fun thumbFor(entry: ArchiveEntry): ByteArray? =
+        entry.parts.singleOrNull()?.let { thumbs[it.assetId] }
 
     /**
      * Opening an archive shows whatever was loaded last time straight away, so going back and
