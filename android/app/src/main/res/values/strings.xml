@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GitHub Drive</string>
+    <string name="share_target_label">Save to GitHub Drive</string>
+    <string name="transfer_channel_name">Transfers</string>
+    <string name="transfer_channel_desc">Upload and download progress</string>
+</resources>
