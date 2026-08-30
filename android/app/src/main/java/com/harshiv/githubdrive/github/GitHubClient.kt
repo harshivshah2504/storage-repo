@@ -50,7 +50,7 @@ class GitHubClient(
         .add("Authorization", "Bearer $token")
         .add("Accept", "application/vnd.github+json")
         .add("X-GitHub-Api-Version", API_VERSION)
-        .add("User-Agent", "github-drive")
+        .add("User-Agent", "memvault")
         .build()
 
     private val repoPath: String get() = "$API_BASE/repos/$owner/$repo"
@@ -147,7 +147,7 @@ class GitHubClient(
     }
 
     /** `ensure_repo` - GET the repo, and only create it when GitHub answers 404. */
-    suspend fun ensureRepo(private: Boolean = true, description: String = "GitHub Drive archives") =
+    suspend fun ensureRepo(private: Boolean = true, description: String = "MemVault storage") =
         withContext(Dispatchers.IO) {
             if (getJson(repoPath, allow404 = true) != null) return@withContext
             val payload = JSONObject()

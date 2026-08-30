@@ -37,8 +37,11 @@ class Prefs(context: Context) {
         set(value) = prefs.edit().putString(KEY_REPO_OWNER, value).apply()
 
     var repoName: String
-        get() = prefs.getString(KEY_REPO_NAME, DEFAULT_REPO) ?: DEFAULT_REPO
+        get() = prefs.getString(KEY_REPO_NAME, null)?.takeIf { it.isNotEmpty() } ?: LEGACY_REPO
         set(value) = prefs.edit().putString(KEY_REPO_NAME, value).apply()
+
+    /** False until a sign-in has settled which storage this install uses. */
+    val hasRepoName: Boolean get() = !prefs.getString(KEY_REPO_NAME, null).isNullOrEmpty()
 
     val isSignedIn: Boolean get() = !token.isNullOrEmpty() && !repoOwner.isNullOrEmpty()
 
@@ -93,7 +96,15 @@ class Prefs(context: Context) {
     }.getOrNull()
 
     companion object {
-        const val DEFAULT_REPO = "github-drive-archives"
+        /** What new sign-ins name their storage. */
+        fun defaultRepoFor(login: String): String = "$login-storage"
+
+        /**
+         * What installs made before storage was named after the account are still using. New
+         * sign-ins only fall back to it when an account already has one, so nobody's files are
+         * left behind in a repository the app has stopped looking at.
+         */
+        const val LEGACY_REPO = "github-drive-archives"
 
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "gd_token_key"

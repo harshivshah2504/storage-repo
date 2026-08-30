@@ -60,7 +60,7 @@ class Uploader(
             val existing = client.getReleaseByTag(resumeTag)
                 ?: throw UploadException("Could not find the archive to resume.")
             val existingMeta = Format.decodeArchiveBody(existing.optString("body"))
-                ?: throw UploadException("Release $resumeTag is not a GitHub Drive archive.")
+                ?: throw UploadException("Release $resumeTag is not a MemVault archive.")
             if (existingMeta.optBoolean("encrypted", false)) {
                 throw UploadException("That archive is encrypted; this app cannot add to it yet.")
             }

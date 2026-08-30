@@ -148,6 +148,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val probe = GitHubClient(token)
                 val user = whileNetworkReturns { probe.viewerLogin() }
                 probe.owner = user
+
+                if (!prefs.hasRepoName) {
+                    // Storage is named after the account now. An install that predates that keeps
+                    // whatever it already had, and a fresh sign-in on an account that used the old
+                    // name adopts it rather than opening an empty second storage beside the files.
+                    probe.repo = Prefs.LEGACY_REPO
+                    val legacyExists = whileNetworkReturns { probe.repoExists() }
+                    prefs.repoName = if (legacyExists) Prefs.LEGACY_REPO else Prefs.defaultRepoFor(user)
+                }
                 probe.repo = prefs.repoName
                 whileNetworkReturns { probe.ensureRepo(private = true) }
 
@@ -162,6 +171,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
                 pendingToken = null
                 login = user
+                repoName = prefs.repoName
                 signedIn = true
                 signInPhase = SignInPhase.Idle
                 refreshArchives()
@@ -214,7 +224,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         detail = null
         signedIn = false
         login = null
-        repoName = Prefs.DEFAULT_REPO
+        repoName = prefs.repoName
         signInPhase = SignInPhase.Idle
     }
 

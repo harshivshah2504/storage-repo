@@ -53,7 +53,7 @@ object DeviceFlow {
         val request = Request.Builder()
             .url(DEVICE_CODE_URL)
             .header("Accept", "application/json")
-            .header("User-Agent", "github-drive")
+            .header("User-Agent", "memvault")
             .post(form)
             .build()
         http.newCall(request).execute().use { response ->
@@ -84,7 +84,7 @@ object DeviceFlow {
         val request = Request.Builder()
             .url(TOKEN_URL)
             .header("Accept", "application/json")
-            .header("User-Agent", "github-drive")
+            .header("User-Agent", "memvault")
             .post(form)
             .build()
         try {

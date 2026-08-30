@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,12 +15,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -74,23 +77,34 @@ fun SignInScreen(
             painter = painterResource(R.drawable.ic_drive),
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.size(72.dp)
+            modifier = Modifier.size(64.dp)
         )
-        Spacer(Modifier.height(16.dp))
-        Text("GitHub Drive", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(20.dp))
         Text(
-            "Store your files in your own GitHub account. Nothing passes through anyone else's server.",
+            "MemVault",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = (-0.5).sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Your files, kept in storage that belongs to you. Nothing passes through anyone else's server.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 8.dp)
         )
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(36.dp))
 
         when (phase) {
             is SignInPhase.Idle -> {
-                Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) {
-                    Text("Sign in with GitHub")
+                Button(
+                    onClick = onStart,
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(vertical = 16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Sign in with GitHub", fontWeight = FontWeight.Medium)
                 }
             }
 
@@ -102,30 +116,36 @@ fun SignInScreen(
                 val code = phase.codes.userCode
                 LaunchedEffect(code) { copyToClipboard(context, code) }
 
+                // A white card with a hairline outline, not a grey slab: the code is the only
+                // thing on this screen worth looking at, so it gets the contrast.
                 Card(
                     modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                 ) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 26.dp, horizontal = 20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            "Your sign-in code",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "YOUR SIGN-IN CODE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            letterSpacing = 1.5.sp
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(14.dp))
                         Text(
                             text = code,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 34.sp,
-                            letterSpacing = 4.sp
+                            fontSize = 36.sp,
+                            letterSpacing = 6.sp,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(12.dp))
                         Text(
                             "Copied. Paste it on the GitHub page.",
                             style = MaterialTheme.typography.bodySmall,
@@ -138,6 +158,8 @@ fun SignInScreen(
 
                 Button(
                     onClick = { openUrl(context, phase.codes.verificationUri) },
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(vertical = 16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -149,6 +171,8 @@ fun SignInScreen(
 
                 OutlinedButton(
                     onClick = { copyToClipboard(context, code, announce = true) },
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(vertical = 16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -181,7 +205,12 @@ fun SignInScreen(
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                Button(
+                    onClick = onStart,
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(vertical = 16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Try again") }
             }
         }
     }

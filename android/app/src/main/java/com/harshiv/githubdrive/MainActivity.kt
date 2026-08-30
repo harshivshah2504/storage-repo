@@ -27,7 +27,7 @@ import com.harshiv.githubdrive.transfer.TransferManager
 import com.harshiv.githubdrive.ui.ArchivesScreen
 import com.harshiv.githubdrive.ui.BrowseScreen
 import com.harshiv.githubdrive.ui.AppViewModel
-import com.harshiv.githubdrive.ui.GitHubDriveTheme
+import com.harshiv.githubdrive.ui.MemVaultTheme
 import com.harshiv.githubdrive.ui.SettingsScreen
 import com.harshiv.githubdrive.ui.SignInScreen
 import com.harshiv.githubdrive.ui.TransfersScreen
@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermission()
 
         setContent {
-            GitHubDriveTheme {
+            MemVaultTheme {
                 AppRoot(
                     pendingShareCount = sharedUris.size,
                     takeSharedUris = {
