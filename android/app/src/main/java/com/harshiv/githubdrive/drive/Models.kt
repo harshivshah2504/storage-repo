@@ -109,6 +109,8 @@ data class ArchiveEntry(
     val originalSize: Long,
     val encrypted: Boolean,
     val contentType: String,
+    /** The preview stored beside this file at upload time, when the archive has one. */
+    val thumbAsset: AssetRef? = null,
     val parts: List<PartRef>,
     val isFolder: Boolean = false,
     val memberOf: BundleRef? = null
@@ -116,6 +118,9 @@ data class ArchiveEntry(
     val name: String get() = relativePath.substringAfterLast('/')
     val parentPath: String get() = relativePath.substringBeforeLast('/', "")
     val kind: String get() = if (isFolder) "folder" else Format.classifyPath(relativePath)
+
+    /** What a cached thumbnail for this entry is filed under: the preview if there is one. */
+    val thumbKey: Long? get() = thumbAsset?.id ?: parts.singleOrNull()?.assetId
     val totalWireBytes: Long get() = parts.sumOf { it.size }
 }
 

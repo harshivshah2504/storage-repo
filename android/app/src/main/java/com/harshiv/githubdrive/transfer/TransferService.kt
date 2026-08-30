@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
@@ -91,21 +92,25 @@ class TransferService : Service() {
     private fun notificationManager(): NotificationManager =
         getSystemService(NOTIFICATION_SERVICE) as NotificationManager
 
-    private fun createChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.transfer_channel_name),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = getString(R.string.transfer_channel_desc)
-            setShowBadge(false)
-        }
-        notificationManager().createNotificationChannel(channel)
-    }
+    private fun createChannel() = ensureChannel(this)
 
     companion object {
-        private const val CHANNEL_ID = "gd_transfers"
+        const val CHANNEL_ID = "gd_transfers"
         private const val NOTIFICATION_ID = 4210
+
+        /** Idempotent, and shared with the gallery backup, which posts on the same channel. */
+        fun ensureChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                context.getString(R.string.transfer_channel_name),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = context.getString(R.string.transfer_channel_desc)
+                setShowBadge(false)
+            }
+            val manager = context.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
     }
 }

@@ -126,13 +126,16 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
                 dropped++
                 continue
             }
+            val order = item.optInt("order", i)
+            val relativePath = item.optString("relative_path")
             entries.add(
                 ArchiveEntry(
-                    order = item.optInt("order", i),
-                    relativePath = item.optString("relative_path"),
+                    order = order,
+                    relativePath = relativePath,
                     originalSize = item.optLong("original_size", 0L),
                     encrypted = item.optBoolean("encrypted", false),
                     contentType = item.optString("content_type", "application/octet-stream"),
+                    thumbAsset = assetsByName[Format.thumbAssetNameFor(order, relativePath)],
                     parts = parts
                 )
             )
@@ -192,6 +195,8 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         for (asset in assets) {
             var name = asset.name
             if (name == Format.MANIFEST_ASSET_NAME || name == Format.COVER_ASSET_NAME) continue
+            // Previews are decoration stored beside the files; they are not files themselves.
+            if (name.startsWith(Format.THUMB_ASSET_PREFIX)) continue
             val encrypted = name.endsWith(Format.ENCRYPTED_SUFFIX) || archiveEncrypted
             if (name.endsWith(Format.ENCRYPTED_SUFFIX)) {
                 name = name.dropLast(Format.ENCRYPTED_SUFFIX.length)
@@ -237,14 +242,25 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         if (entry.encrypted || entry.isFolder) return@withContext null
         if (entry.kind != "image") return@withContext null
         if (entry.memberOf != null) return@withContext null
-        val part = entry.parts.singleOrNull() ?: return@withContext null
-        if (part.size > THUMB_SOURCE_MAX_BYTES) return@withContext null
 
-        val cached = File(cacheDir, "thumb-${part.assetId}.jpg")
+        val stored = entry.thumbAsset
+        val cacheId = stored?.id ?: entry.parts.singleOrNull()?.assetId ?: return@withContext null
+        val cached = File(cacheDir, "thumb-$cacheId.jpg")
         if (cached.exists() && cached.length() > 0L) {
             return@withContext runCatching { cached.readBytes() }.getOrNull()
         }
 
+        // An archive written by a version that stores previews costs 40 KB a picture here.
+        if (stored != null) {
+            val bytes = runCatching { client.downloadAssetBytes(stored.id) }.getOrNull()
+                ?: return@withContext null
+            runCatching { cached.writeBytes(bytes) }
+            return@withContext bytes
+        }
+
+        // Older archives have no preview, so the original has to come down and be shrunk once.
+        val part = entry.parts.singleOrNull() ?: return@withContext null
+        if (part.size > THUMB_SOURCE_MAX_BYTES) return@withContext null
         val source = runCatching { client.downloadAssetBytes(part.assetId) }.getOrNull()
             ?: return@withContext null
         val thumb = Cover.buildJpeg(source) ?: return@withContext null

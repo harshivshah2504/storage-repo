@@ -617,9 +617,9 @@ fun SettingsScreen(
                 supportingContent = {
                     Text(
                         if (autoUpload) {
-                            "Photos and videos you take go up on their own, within about 15 minutes."
+                            "Photos and videos you take go up on their own, overnight."
                         } else {
-                            "Photos and videos you take from now on will go up on their own."
+                            "Photos and videos you take from now on will go up overnight."
                         }
                     )
                 },

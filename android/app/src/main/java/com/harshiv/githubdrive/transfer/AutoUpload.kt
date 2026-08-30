@@ -1,6 +1,8 @@
 package com.harshiv.githubdrive.transfer
 
 import android.Manifest
+import android.app.Notification
+import android.app.PendingIntent
 import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
@@ -11,27 +13,29 @@ import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
-import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.harshiv.githubdrive.GdApp
+import com.harshiv.githubdrive.MainActivity
+import com.harshiv.githubdrive.R
 import com.harshiv.githubdrive.drive.UploadItem
 import com.harshiv.githubdrive.drive.Uploader
 import com.harshiv.githubdrive.github.GitHubClient
 import java.io.IOException
+import java.time.Duration
+import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
 
 /**
  * Backs the camera roll up on its own.
  *
- * Deliberately a plain periodic worker rather than anything cleverer: the phones this has to
- * survive - Samsung, Xiaomi - freeze background apps within seconds, and WorkManager is the one
- * scheduler they still honour. It means a new photo is picked up within about a quarter of an hour
- * rather than instantly, which is the right trade for a backup.
+ * Runs once a night. WorkManager is the scheduler the phones this has to survive - Samsung,
+ * Xiaomi - still honour after they freeze a background app, and a backup that happens while the
+ * phone is on charge and on Wi-Fi is worth more than one that races the camera shutter.
  *
  * Each photo is uploaded as its own archive, exactly as picking it by hand would.
  */
@@ -40,11 +44,27 @@ object AutoUpload {
     private const val WORK_NAME = "gallery-backup"
     private const val WORK_NAME_NOW = "gallery-backup-now"
 
-    /** How many are taken per run, so one wake-up cannot spend the whole battery. */
-    private const val BATCH = 20
+    /**
+     * How many are taken per run.
+     *
+     * A run that still has work left when it hits this queues an immediate continuation rather
+     * than holding one wake-up open indefinitely.
+     */
+    private const val BATCH = 25
 
-    /** Applies whatever the settings currently say. Safe to call repeatedly. */
-    fun sync(context: Context) {
+    private const val NOTIFICATION_ID = 4211
+
+    /** Marks the immediate runs, so only the scheduled one books the following night. */
+    private const val TAG_CONTINUATION = "gallery-backup-immediate"
+
+    /**
+     * Puts the nightly run in the calendar. Safe to call repeatedly.
+     *
+     * [force] replaces whatever is already scheduled, which is what a change to the settings
+     * wants; the default leaves an existing run alone so opening the app cannot cancel a backup
+     * that is mid-flight.
+     */
+    fun sync(context: Context, force: Boolean = false) {
         val app = context.applicationContext
         val prefs = (app as GdApp).prefs
         val work = WorkManager.getInstance(app)
@@ -54,15 +74,14 @@ object AutoUpload {
             return
         }
 
-        val request = PeriodicWorkRequestBuilder<Worker>(15, TimeUnit.MINUTES)
-            .setConstraints(constraints(prefs.autoUploadWifiOnly))
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
-            .build()
-
-        work.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+        work.enqueueUniqueWork(
+            WORK_NAME,
+            if (force) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
+            nightlyRequest(prefs.autoUploadWifiOnly)
+        )
     }
 
-    /** Runs a pass now, without waiting for the next window - used when the setting is switched on. */
+    /** Runs a pass now rather than waiting for tonight - used when the setting is switched on. */
     fun runNow(context: Context) {
         val app = context.applicationContext
         val prefs = (app as GdApp).prefs
@@ -71,10 +90,33 @@ object AutoUpload {
         val request = OneTimeWorkRequestBuilder<Worker>()
             .setConstraints(constraints(prefs.autoUploadWifiOnly))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+            .addTag(TAG_CONTINUATION)
             .build()
 
         WorkManager.getInstance(app)
             .enqueueUniqueWork(WORK_NAME_NOW, ExistingWorkPolicy.REPLACE, request)
+    }
+
+    /**
+     * One run, delayed until the next midnight.
+     *
+     * Each run books the following night at the end of itself rather than repeating on a period,
+     * so the target stays midnight instead of drifting by however long the previous backup took.
+     * WorkManager will not fire to the second - Doze holds jobs until a maintenance window, and
+     * the network and battery constraints have to be met too - so this means "overnight", not
+     * "at 00:00:00".
+     */
+    private fun nightlyRequest(wifiOnly: Boolean) =
+        OneTimeWorkRequestBuilder<Worker>()
+            .setInitialDelay(millisUntilMidnight(), TimeUnit.MILLISECONDS)
+            .setConstraints(constraints(wifiOnly))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.MINUTES)
+            .build()
+
+    private fun millisUntilMidnight(): Long {
+        val now = ZonedDateTime.now()
+        val midnight = now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+        return Duration.between(now, midnight).toMillis().coerceAtLeast(0L)
     }
 
     private fun constraints(wifiOnly: Boolean) = Constraints.Builder()
@@ -120,9 +162,15 @@ object AutoUpload {
 
     class Worker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
+        override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo()
+
         override suspend fun doWork(): Result {
             val app = applicationContext as GdApp
             val prefs = app.prefs
+
+            // Tonight's run books tomorrow's before anything else, so a failure part way through
+            // cannot take the whole schedule down with it.
+            if (!isContinuation()) scheduleNextNight(prefs)
 
             if (!prefs.autoUpload) return Result.success()
             if (!canReadGallery(applicationContext)) return Result.success()
@@ -131,6 +179,10 @@ object AutoUpload {
 
             val pending = newMedia(prefs.autoUploadSince, prefs.autoUploadLastId)
             if (pending.isEmpty()) return Result.success()
+
+            // A backup is a long upload, and a plain background worker is stopped after ten
+            // minutes. Running in the foreground buys the time one large video needs.
+            runCatching { setForeground(foregroundInfo()) }
 
             val uploader = Uploader(applicationContext, GitHubClient(token, owner, prefs.repoName))
 
@@ -149,7 +201,51 @@ object AutoUpload {
                 prefs.autoUploadSince = media.dateAdded
                 prefs.autoUploadLastId = media.id
             }
+
+            // A full batch means the camera roll probably has more waiting. Rather than hold this
+            // wake-up open, hand the rest to a fresh run under the same constraints.
+            if (pending.size >= BATCH) runNow(applicationContext)
             return Result.success()
+        }
+
+        /** True for the immediate follow-up runs, which must not re-book tomorrow night. */
+        private fun isContinuation(): Boolean = tags.contains(TAG_CONTINUATION)
+
+        private fun scheduleNextNight(prefs: com.harshiv.githubdrive.core.Prefs) {
+            if (!prefs.autoUpload || !prefs.isSignedIn) return
+            WorkManager.getInstance(applicationContext).enqueueUniqueWork(
+                WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                nightlyRequest(prefs.autoUploadWifiOnly)
+            )
+        }
+
+        private fun foregroundInfo(): ForegroundInfo {
+            TransferService.ensureChannel(applicationContext)
+            val open = PendingIntent.getActivity(
+                applicationContext,
+                0,
+                android.content.Intent(applicationContext, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = Notification.Builder(applicationContext, TransferService.CHANNEL_ID)
+                .setContentTitle(applicationContext.getString(R.string.app_name))
+                .setContentText("Backing up your photos")
+                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(open)
+                .build()
+
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ForegroundInfo(
+                    NOTIFICATION_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                ForegroundInfo(NOTIFICATION_ID, notification)
+            }
         }
 
         /**

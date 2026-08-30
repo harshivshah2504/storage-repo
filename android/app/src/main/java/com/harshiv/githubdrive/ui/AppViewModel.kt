@@ -221,7 +221,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         signInJob?.cancel()
         prefs.autoUpload = false
         autoUpload = false
-        AutoUpload.sync(getApplication())
+        AutoUpload.sync(getApplication(), force = true)
         // Before the token goes, while there is still a client to build a repo from.
         repo()?.clearThumbnailCache()
         prefs.clear()
@@ -313,15 +313,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prefs.autoUpload = enabled
         autoUpload = enabled
         val context = getApplication<Application>()
-        AutoUpload.sync(context)
+        AutoUpload.sync(context, force = true)
         if (enabled) AutoUpload.runNow(context)
-        banner = if (enabled) "New photos will back up by themselves." else "Photo backup is off."
+        banner = if (enabled) {
+            "New photos back up overnight."
+        } else {
+            "Photo backup is off."
+        }
     }
 
     fun backUpOnWifiOnly(wifiOnly: Boolean) {
         prefs.autoUploadWifiOnly = wifiOnly
         autoUploadWifiOnly = wifiOnly
-        AutoUpload.sync(getApplication())
+        AutoUpload.sync(getApplication(), force = true)
     }
 
     fun toggleBrowseView() {
@@ -330,18 +334,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Fetches and caches the thumbnail for one image inside an archive, once. */
     fun loadThumb(entry: ArchiveEntry) {
-        val assetId = entry.parts.singleOrNull()?.assetId ?: return
-        if (thumbs.containsKey(assetId)) return
+        val key = entry.thumbKey ?: return
+        if (thumbs.containsKey(key)) return
         val repo = repo() ?: return
-        thumbs[assetId] = null
+        thumbs[key] = null
         viewModelScope.launch {
             val bytes = withContext(Dispatchers.IO) { thumbGate.withPermit { repo.thumbnail(entry) } }
-            if (bytes != null) thumbs[assetId] = bytes
+            if (bytes != null) thumbs[key] = bytes
         }
     }
 
-    fun thumbFor(entry: ArchiveEntry): ByteArray? =
-        entry.parts.singleOrNull()?.let { thumbs[it.assetId] }
+    fun thumbFor(entry: ArchiveEntry): ByteArray? = entry.thumbKey?.let { thumbs[it] }
 
     /**
      * Opening an archive shows whatever was loaded last time straight away, so going back and

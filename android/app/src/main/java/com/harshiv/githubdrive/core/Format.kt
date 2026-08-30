@@ -20,6 +20,9 @@ object Format {
     const val MANIFEST_ASSET_NAME = "_manifest.json"
     const val COVER_ASSET_NAME = "_cover.jpg"
 
+    /** Marks the small previews this app stores beside images; never a file in its own right. */
+    const val THUMB_ASSET_PREFIX = "_thumb-"
+
     const val STORAGE_MODE_FILE_ASSETS = "file-assets"
     const val STORAGE_MODE_BUNDLE_ASSETS = "bundle-assets"
 
@@ -92,6 +95,19 @@ object Format {
         val safe = sanitizeForAssetName(flatten(relativePath)).take(180)
         val suffix = if (encrypted) ENCRYPTED_SUFFIX else ""
         return String.format(Locale.ROOT, "%04d-%s%s", order, safe, suffix)
+    }
+
+    /**
+     * Name of the small preview stored beside an image: `_thumb-NNNN-<safe>.jpg`.
+     *
+     * An extra asset rather than a manifest field on purpose. The manifest is `asdict(ArchiveItem)`
+     * on the Python side, so a key this writer invented could break a reader that rebuilds items
+     * from it; an unreferenced asset is only ever ignored. Readers that know about it save
+     * themselves a full-size download per picture, and readers that do not lose nothing.
+     */
+    fun thumbAssetNameFor(order: Int, relativePath: String): String {
+        val safe = sanitizeForAssetName(flatten(relativePath)).take(160)
+        return String.format(Locale.ROOT, "$THUMB_ASSET_PREFIX%04d-%s.jpg", order, safe)
     }
 
     /** `_part_asset_name_for` - `NNNN-<safe>.partKKKK[.enc]`, safe part truncated to 160 chars. */

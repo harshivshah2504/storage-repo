@@ -166,6 +166,8 @@ class Uploader(
                 parts = built
             }
 
+            uploadThumbnail(releaseId, order, item, existingAssets)
+
             manifestItems.add(
                 itemMap(
                     order = order,
@@ -207,6 +209,31 @@ class Uploader(
 
         val finalRelease = client.getRelease(releaseId)
         ArchiveSummary.from(finalRelease, Format.decodeArchiveBody(finalRelease.optString("body")) ?: JSONObject())
+    }
+
+    /**
+     * Stores a small preview beside a picture.
+     *
+     * Without one, showing a folder of photos means downloading every original just to shrink it -
+     * megabytes a picture, every time a new device opens the archive. The preview is around 40 KB
+     * and is built from the local file, which is already in hand, so it costs one small upload
+     * rather than a download. Best effort throughout: a preview is decoration, and no upload
+     * should ever fail over it.
+     */
+    private suspend fun uploadThumbnail(
+        releaseId: Long,
+        order: Int,
+        item: UploadItem,
+        existingAssets: Map<String, JSONObject>
+    ) {
+        if (Format.classifyPath(item.relativePath) != "image") return
+        val name = Format.thumbAssetNameFor(order, item.relativePath)
+        if (existingAssets.containsKey(name)) return
+
+        val jpeg = Cover.buildJpeg(context, item.uri) ?: return
+        runCatching {
+            client.uploadAssetBytes(releaseId, name, jpeg, "image/jpeg")
+        }
     }
 
     // ------------------------------------------------------------------ metadata
