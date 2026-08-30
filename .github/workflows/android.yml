@@ -73,13 +73,17 @@ jobs:
         working-directory: android
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/release/app-release*.apk out/github-drive.apk
+          cp app/build/outputs/apk/release/app-release*.apk out/memvault.apk
+          # R8 renames everything; without this file a release crash trace is unreadable.
+          cp app/build/outputs/mapping/release/mapping.txt out/mapping.txt || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: github-drive-apk
-          path: android/out/github-drive.apk
+          name: memvault-apk
+          path: |
+            android/out/memvault.apk
+            android/out/mapping.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -87,4 +91,4 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: android/out/github-drive.apk
+          files: android/out/memvault.apk

@@ -35,7 +35,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 strips unused code and renames what is left. It does not make the APK
+            // unreadable - nothing can - it just makes reading it tedious.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = if (!System.getenv("GD_KEYSTORE_FILE").isNullOrBlank()) {
                 signingConfigs.getByName("release")
