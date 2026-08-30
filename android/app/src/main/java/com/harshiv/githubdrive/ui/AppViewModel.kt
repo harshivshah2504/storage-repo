@@ -305,7 +305,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * watermark is reset to this moment, so nobody hands their whole camera roll to a phone
      * connection by flipping a switch. The caller is responsible for holding the media permission.
      */
-    fun setAutoUpload(enabled: Boolean) {
+    fun backUpGallery(enabled: Boolean) {
         if (enabled) {
             prefs.autoUploadSince = System.currentTimeMillis() / 1000L
             prefs.autoUploadLastId = 0L
@@ -318,7 +318,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         banner = if (enabled) "New photos will back up by themselves." else "Photo backup is off."
     }
 
-    fun setAutoUploadWifiOnly(wifiOnly: Boolean) {
+    fun backUpOnWifiOnly(wifiOnly: Boolean) {
         prefs.autoUploadWifiOnly = wifiOnly
         autoUploadWifiOnly = wifiOnly
         AutoUpload.sync(getApplication())
