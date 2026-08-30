@@ -53,6 +53,22 @@ class Prefs(context: Context) {
 
     val isSignedIn: Boolean get() = !token.isNullOrEmpty() && !repoOwner.isNullOrEmpty()
 
+    /**
+     * A running total of what has been stored, kept here so Settings can answer instantly.
+     *
+     * Counting it properly means walking every release, because a repository's reported size does
+     * not include release assets. Adding each upload to a number as it finishes costs nothing and
+     * is right in the ordinary case; the real walk still runs quietly to correct any drift - an
+     * upload from the web app or another phone is invisible to this counter.
+     */
+    var storedBytes: Long
+        get() = prefs.getLong(KEY_STORED_BYTES, 0L).coerceAtLeast(0L)
+        set(value) = prefs.edit().putLong(KEY_STORED_BYTES, value.coerceAtLeast(0L)).apply()
+
+    fun addStoredBytes(delta: Long) {
+        storedBytes = storedBytes + delta
+    }
+
     // ------------------------------------------------------------------ gallery backup
 
     var autoUpload: Boolean
@@ -142,6 +158,7 @@ class Prefs(context: Context) {
         private const val KEY_LOGIN = "login"
         private const val KEY_REPO_OWNER = "repo_owner"
         private const val KEY_REPO_NAME = "repo_name"
+        private const val KEY_STORED_BYTES = "stored_bytes"
         private const val KEY_AUTO_UPLOAD = "auto_upload"
         private const val KEY_AUTO_UPLOAD_WIFI = "auto_upload_wifi_only"
         private const val KEY_AUTO_UPLOAD_SINCE = "auto_upload_since"

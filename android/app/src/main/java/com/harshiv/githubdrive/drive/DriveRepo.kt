@@ -29,37 +29,27 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         return Pair(archives, hasMore)
     }
 
-    /** What the storage holds in total, counted across every page of releases. */
-    data class Usage(val archives: Int, val files: Int, val bytes: Long)
-
     /**
-     * Adds up everything stored.
+     * The true total of everything stored, by walking every release.
      *
-     * There is no cheap answer to this: a repository's reported size does not include release
-     * assets, which is where every file here lives, so the only way to know is to walk the
-     * releases. At a hundred per page that is one request for most people.
-     *
-     * The total is what the storage actually costs - manifests, covers and previews included -
-     * rather than only the bytes of the files that were picked.
+     * Only used to correct the running total the app keeps as it uploads: there is no cheap answer
+     * here, because a repository's reported size excludes release assets and that is where every
+     * file lives. The figure is what the storage actually costs - manifests, covers and previews
+     * included - not only the bytes of the files that were picked.
      */
-    suspend fun usage(): Usage {
-        var archives = 0
-        var files = 0
+    suspend fun totalBytes(): Long {
         var bytes = 0L
         var page = 1
         while (page <= MAX_USAGE_PAGES) {
             val (releases, hasMore) = client.listReleasesPage(page, 100)
             for (release in releases) {
                 val meta = Format.decodeArchiveBody(release.optString("body")) ?: continue
-                val summary = ArchiveSummary.from(release, meta)
-                archives++
-                files += summary.totalItems
-                bytes += summary.totalAssetBytes
+                bytes += ArchiveSummary.from(release, meta).totalAssetBytes
             }
             if (!hasMore) break
             page++
         }
-        return Usage(archives, files, bytes)
+        return bytes
     }
 
     // ------------------------------------------------------------------ one archive

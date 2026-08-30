@@ -198,9 +198,8 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         Screen.SETTINGS -> SettingsScreen(
             login = vm.login,
             repoName = vm.repoName,
-            usage = vm.usage,
-            usageLoading = vm.usageLoading,
-            onLoadUsage = { vm.loadUsage() },
+            storedBytes = vm.storedBytes,
+            onRefreshStorageUsed = { vm.refreshStorageUsed() },
             autoUpload = vm.autoUpload,
             autoUploadWifiOnly = vm.autoUploadWifiOnly,
             onAutoUpload = { vm.backUpGallery(it) },

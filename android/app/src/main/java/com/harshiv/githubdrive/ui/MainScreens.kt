@@ -77,7 +77,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harshiv.githubdrive.drive.ArchiveEntry
 import com.harshiv.githubdrive.drive.ArchiveSummary
-import com.harshiv.githubdrive.drive.DriveRepo
 import com.harshiv.githubdrive.transfer.AutoUpload
 import com.harshiv.githubdrive.transfer.Transfer
 import com.harshiv.githubdrive.transfer.TransferKind
@@ -561,9 +560,8 @@ private fun TransferRow(transfer: Transfer, onCancel: (Long) -> Unit) {
 fun SettingsScreen(
     login: String?,
     repoName: String,
-    usage: DriveRepo.Usage?,
-    usageLoading: Boolean,
-    onLoadUsage: () -> Unit,
+    storedBytes: Long,
+    onRefreshStorageUsed: () -> Unit,
     autoUpload: Boolean,
     autoUploadWifiOnly: Boolean,
     onAutoUpload: (Boolean) -> Unit,
@@ -575,7 +573,7 @@ fun SettingsScreen(
     var confirmSignOut by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    LaunchedEffect(Unit) { onLoadUsage() }
+    LaunchedEffect(Unit) { onRefreshStorageUsed() }
 
     // Reading the camera roll is only asked for at the moment someone switches the backup on.
     val askForGallery = rememberLauncherForActivityResult(
@@ -620,27 +618,8 @@ fun SettingsScreen(
             )
             ListItem(
                 headlineContent = { Text("Space used") },
-                supportingContent = {
-                    Text(
-                        when {
-                            usage != null -> {
-                                val archives = usage.archives
-                                val files = usage.files
-                                formatBytes(usage.bytes) +
-                                    " - $files file${if (files == 1) "" else "s"}" +
-                                    " in $archives archive${if (archives == 1) "" else "s"}"
-                            }
-                            usageLoading -> "Adding it up..."
-                            else -> "Could not work it out just now."
-                        }
-                    )
-                },
-                leadingContent = { Icon(Icons.Filled.PieChart, contentDescription = null) },
-                trailingContent = {
-                    if (usageLoading) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    }
-                }
+                supportingContent = { Text(formatBytes(storedBytes)) },
+                leadingContent = { Icon(Icons.Filled.PieChart, contentDescription = null) }
             )
             HorizontalDivider()
             ListItem(

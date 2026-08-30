@@ -2,6 +2,7 @@ package com.harshiv.githubdrive.drive
 
 import android.content.Context
 import android.net.Uri
+import com.harshiv.githubdrive.GdApp
 import com.harshiv.githubdrive.core.Format
 import com.harshiv.githubdrive.core.PyJson
 import com.harshiv.githubdrive.github.GitHubClient
@@ -90,6 +91,7 @@ class Uploader(
 
         // Snapshot taken once; concurrent name clashes fall back to GitHub's already_exists handling.
         val existingAssets = client.listReleaseAssets(releaseId).associateBy { it.optString("name") }
+        val alreadyStoredBytes = existingAssets.values.sumOf { it.optLong("size", 0L) }
 
         // ---- upload each file ------------------------------------------------------------
         val manifestItems = ArrayList<Map<String, Any?>>(entries.size)
@@ -208,7 +210,17 @@ class Uploader(
         onProgress(Progress(entries.size, entries.size, totalBytes, totalBytes, ""))
 
         val finalRelease = client.getRelease(releaseId)
-        ArchiveSummary.from(finalRelease, Format.decodeArchiveBody(finalRelease.optString("body")) ?: JSONObject())
+        val summary = ArchiveSummary.from(
+            finalRelease,
+            Format.decodeArchiveBody(finalRelease.optString("body")) ?: JSONObject()
+        )
+
+        // Counted here rather than at the call sites, so the manual picker, a share from another
+        // app and the nightly gallery backup all keep the running total honest without each having
+        // to remember to. A resume adds the difference, not the whole archive again.
+        (context.applicationContext as? GdApp)?.prefs?.addStoredBytes(summary.totalAssetBytes - alreadyStoredBytes)
+
+        summary
     }
 
     /**

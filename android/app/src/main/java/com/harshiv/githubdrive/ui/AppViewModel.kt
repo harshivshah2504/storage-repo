@@ -82,9 +82,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Archives already opened this session, so reopening one is instant. */
     private val details = HashMap<Long, ArchiveDetail>()
 
-    var usage by mutableStateOf<DriveRepo.Usage?>(null)
-        private set
-    var usageLoading by mutableStateOf(false)
+    /** Answers instantly: a running total the uploader keeps, corrected in the background. */
+    var storedBytes by mutableStateOf(prefs.storedBytes)
         private set
 
     /** Thumbnail bytes keyed by asset id; null means "looked and there isn't one". */
@@ -229,7 +228,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         covers.clear()
         thumbs.clear()
         details.clear()
-        usage = null
+        storedBytes = 0L
         archives = emptyList()
         detail = null
         signedIn = false
@@ -243,7 +242,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshArchives() {
         val repo = repo() ?: return
         details.clear()
-        usage = null
+        storedBytes = prefs.storedBytes
         page = 1
         archivesLoading = true
         archivesError = null
@@ -348,21 +347,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun thumbFor(entry: ArchiveEntry): ByteArray? = entry.thumbKey?.let { thumbs[it] }
 
     /**
-     * Adds up what the storage holds. Walks every page, so it is asked for when Settings opens
-     * rather than kept live behind the grid.
+     * Shows the running total straight away, then quietly checks it against what is really stored.
+     *
+     * The counter cannot see an upload made from the web app or another phone, so left alone it
+     * would drift low forever. The walk costs one request and no waiting - nothing on screen is
+     * blocked on it, the number simply corrects itself if it was wrong.
      */
-    fun loadUsage(force: Boolean = false) {
-        if (usageLoading) return
-        if (usage != null && !force) return
+    fun refreshStorageUsed() {
+        storedBytes = prefs.storedBytes
         val repo = repo() ?: return
-        usageLoading = true
         viewModelScope.launch {
-            try {
-                usage = repo.usage()
-            } catch (e: Exception) {
-                usage = null
-            } finally {
-                usageLoading = false
+            runCatching { repo.totalBytes() }.onSuccess { actual ->
+                prefs.storedBytes = actual
+                storedBytes = actual
             }
         }
     }
@@ -411,7 +408,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 archives = archives.filterNot { it.releaseId == summary.releaseId }
                 covers.remove(summary.releaseId)
                 details.remove(summary.releaseId)
-                usage = null
+                prefs.addStoredBytes(-summary.totalAssetBytes)
+                storedBytes = prefs.storedBytes
                 banner = "Deleted ${summary.sourceName}"
             } catch (e: Exception) {
                 banner = friendly(e)
