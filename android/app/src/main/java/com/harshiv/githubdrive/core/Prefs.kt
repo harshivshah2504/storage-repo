@@ -45,6 +45,30 @@ class Prefs(context: Context) {
 
     val isSignedIn: Boolean get() = !token.isNullOrEmpty() && !repoOwner.isNullOrEmpty()
 
+    // ------------------------------------------------------------------ gallery backup
+
+    var autoUpload: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_UPLOAD, false)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_UPLOAD, value).apply()
+
+    var autoUploadWifiOnly: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_UPLOAD_WIFI, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_UPLOAD_WIFI, value).apply()
+
+    /**
+     * How far the camera roll has been backed up, as `(date_added, _id)`.
+     *
+     * The pair matters: a burst of photos shares one `date_added` second, and a watermark of only
+     * the timestamp would skip every shot after the first in that second.
+     */
+    var autoUploadSince: Long
+        get() = prefs.getLong(KEY_AUTO_UPLOAD_SINCE, 0L)
+        set(value) = prefs.edit().putLong(KEY_AUTO_UPLOAD_SINCE, value).apply()
+
+    var autoUploadLastId: Long
+        get() = prefs.getLong(KEY_AUTO_UPLOAD_LAST_ID, 0L)
+        set(value) = prefs.edit().putLong(KEY_AUTO_UPLOAD_LAST_ID, value).apply()
+
     fun clear() {
         prefs.edit().clear().apply()
         runCatching {
@@ -114,5 +138,9 @@ class Prefs(context: Context) {
         private const val KEY_LOGIN = "login"
         private const val KEY_REPO_OWNER = "repo_owner"
         private const val KEY_REPO_NAME = "repo_name"
+        private const val KEY_AUTO_UPLOAD = "auto_upload"
+        private const val KEY_AUTO_UPLOAD_WIFI = "auto_upload_wifi_only"
+        private const val KEY_AUTO_UPLOAD_SINCE = "auto_upload_since"
+        private const val KEY_AUTO_UPLOAD_LAST_ID = "auto_upload_last_id"
     }
 }

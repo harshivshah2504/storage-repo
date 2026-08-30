@@ -2,6 +2,9 @@
 
 package com.harshiv.githubdrive.ui
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +37,7 @@ import androidx.compose.material.icons.filled.Inbox
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapVert
@@ -53,6 +57,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -63,6 +68,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
@@ -70,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.harshiv.githubdrive.drive.ArchiveEntry
 import com.harshiv.githubdrive.drive.ArchiveSummary
+import com.harshiv.githubdrive.transfer.AutoUpload
 import com.harshiv.githubdrive.transfer.Transfer
 import com.harshiv.githubdrive.transfer.TransferKind
 import com.harshiv.githubdrive.transfer.TransferState
@@ -552,11 +559,31 @@ private fun TransferRow(transfer: Transfer, onCancel: (Long) -> Unit) {
 fun SettingsScreen(
     login: String?,
     repoName: String,
+    autoUpload: Boolean,
+    autoUploadWifiOnly: Boolean,
+    onAutoUpload: (Boolean) -> Unit,
+    onAutoUploadWifiOnly: (Boolean) -> Unit,
     onOpenRepo: () -> Unit,
     onSignOut: () -> Unit,
     onBack: () -> Unit
 ) {
     var confirmSignOut by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Reading the camera roll is only asked for at the moment someone switches the backup on.
+    val askForGallery = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        if (AutoUpload.canReadGallery(context)) {
+            onAutoUpload(true)
+        } else {
+            Toast.makeText(
+                context,
+                "Photo backup needs permission to read your gallery.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -584,6 +611,43 @@ fun SettingsScreen(
                 },
                 modifier = Modifier.clickable { onOpenRepo() }
             )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("Back up my photos") },
+                supportingContent = {
+                    Text(
+                        if (autoUpload) {
+                            "Photos and videos you take go up on their own, within about 15 minutes."
+                        } else {
+                            "Photos and videos you take from now on will go up on their own."
+                        }
+                    )
+                },
+                leadingContent = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
+                trailingContent = {
+                    Switch(
+                        checked = autoUpload,
+                        onCheckedChange = { wanted ->
+                            if (!wanted) {
+                                onAutoUpload(false)
+                            } else if (AutoUpload.canReadGallery(context)) {
+                                onAutoUpload(true)
+                            } else {
+                                askForGallery.launch(AutoUpload.mediaPermissions())
+                            }
+                        }
+                    )
+                }
+            )
+            if (autoUpload) {
+                ListItem(
+                    headlineContent = { Text("Only on Wi-Fi") },
+                    supportingContent = { Text("Leave this on to keep backups off your mobile data.") },
+                    trailingContent = {
+                        Switch(checked = autoUploadWifiOnly, onCheckedChange = onAutoUploadWifiOnly)
+                    }
+                )
+            }
             HorizontalDivider()
             ListItem(
                 headlineContent = { Text("Sign out") },

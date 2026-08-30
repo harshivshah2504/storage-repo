@@ -192,6 +192,10 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         Screen.SETTINGS -> SettingsScreen(
             login = vm.login,
             repoName = vm.repoName,
+            autoUpload = vm.autoUpload,
+            autoUploadWifiOnly = vm.autoUploadWifiOnly,
+            onAutoUpload = { vm.setAutoUpload(it) },
+            onAutoUploadWifiOnly = { vm.setAutoUploadWifiOnly(it) },
             onOpenRepo = {
                 val url = "https://github.com/${vm.login}/${vm.repoName}"
                 runCatching {

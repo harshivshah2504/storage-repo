@@ -20,6 +20,7 @@ import com.harshiv.githubdrive.drive.UploadItem
 import com.harshiv.githubdrive.drive.Uploader
 import com.harshiv.githubdrive.github.DeviceFlow
 import com.harshiv.githubdrive.github.GitHubClient
+import com.harshiv.githubdrive.transfer.AutoUpload
 import com.harshiv.githubdrive.transfer.TransferManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -92,6 +93,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val thumbGate = Semaphore(3)
 
     var browseView by mutableStateOf(BrowseView.LIST)
+        private set
+
+    var autoUpload by mutableStateOf(prefs.autoUpload)
+        private set
+    var autoUploadWifiOnly by mutableStateOf(prefs.autoUploadWifiOnly)
         private set
 
     private var signInJob: Job? = null
@@ -173,6 +179,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 login = user
                 repoName = prefs.repoName
                 signedIn = true
+                AutoUpload.sync(getApplication())
                 signInPhase = SignInPhase.Idle
                 refreshArchives()
             } catch (e: Exception) {
@@ -212,6 +219,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun signOut() {
         signInJob?.cancel()
+        prefs.autoUpload = false
+        autoUpload = false
+        AutoUpload.sync(getApplication())
         // Before the token goes, while there is still a client to build a repo from.
         repo()?.clearThumbnailCache()
         prefs.clear()
@@ -286,6 +296,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (bytes != null) covers[summary.releaseId] = bytes
         }
+    }
+
+    /**
+     * Turns the gallery backup on or off.
+     *
+     * Switching it on means "from now on", never "upload everything I have ever taken": the
+     * watermark is reset to this moment, so nobody hands their whole camera roll to a phone
+     * connection by flipping a switch. The caller is responsible for holding the media permission.
+     */
+    fun setAutoUpload(enabled: Boolean) {
+        if (enabled) {
+            prefs.autoUploadSince = System.currentTimeMillis() / 1000L
+            prefs.autoUploadLastId = 0L
+        }
+        prefs.autoUpload = enabled
+        autoUpload = enabled
+        val context = getApplication<Application>()
+        AutoUpload.sync(context)
+        if (enabled) AutoUpload.runNow(context)
+        banner = if (enabled) "New photos will back up by themselves." else "Photo backup is off."
+    }
+
+    fun setAutoUploadWifiOnly(wifiOnly: Boolean) {
+        prefs.autoUploadWifiOnly = wifiOnly
+        autoUploadWifiOnly = wifiOnly
+        AutoUpload.sync(getApplication())
     }
 
     fun toggleBrowseView() {
