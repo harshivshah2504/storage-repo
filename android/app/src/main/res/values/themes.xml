@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.GitHubDrive" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">#FFF6F8FA</item>
+    <!--
+      MemVault is dark whatever the phone is set to, so there is no values-night variant: this is
+      the only theme. The window background matches the Compose background exactly, otherwise the
+      launch window flashes a different colour before the first frame is drawn.
+    -->
+    <style name="Theme.MemVault" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0B0D10</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 
-    <style name="Theme.GitHubDrive.Transparent" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.MemVault.Transparent" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowNoTitle">true</item>
