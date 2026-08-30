@@ -84,7 +84,8 @@ fun SignInScreen(
             "MemVault",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.SemiBold,
-            letterSpacing = (-0.5).sp
+            letterSpacing = (-0.5).sp,
+            color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(Modifier.height(10.dp))
         Text(

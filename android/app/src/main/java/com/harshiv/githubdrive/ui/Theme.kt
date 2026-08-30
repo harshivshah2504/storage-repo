@@ -1,8 +1,11 @@
 package com.harshiv.githubdrive.ui
 
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
 /**
@@ -31,7 +34,22 @@ private val DarkColors = darkColorScheme(
     onError = Color(0xFF14161A)
 )
 
+/**
+ * The Surface is not decoration.
+ *
+ * MaterialTheme sets the colour scheme but not `LocalContentColor` - Surface is what does that -
+ * so any Text that does not name a colour of its own falls back to Compose's default black. On a
+ * screen built from a bare Column, that is invisible type. Wrapping here fixes it for every screen
+ * at once rather than one forgotten Text at a time.
+ */
 @Composable
 fun MemVaultTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = DarkColors, content = content)
+    MaterialTheme(colorScheme = DarkColors) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+            contentColor = MaterialTheme.colorScheme.onBackground,
+            content = content
+        )
+    }
 }
