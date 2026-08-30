@@ -356,9 +356,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshStorageUsed(force: Boolean = false) {
         storedBytes = prefs.storedBytes
 
-        // Opening Settings twice in a minute should not walk the releases twice. The counter is
-        // already right for anything this phone did; the walk is only there to catch what it
-        // could not see, and that does not change by the minute.
+        // The counter is already right for anything this phone did. The walk only exists to catch
+        // what it cannot see - an upload from the web app or another phone - so checking once a
+        // day is plenty, and Settings costs nothing to open the rest of the time.
         val age = System.currentTimeMillis() - prefs.storageCheckedAt
         if (!force && age < STORAGE_RECHECK_MILLIS) return
 
@@ -498,6 +498,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         /** How stale the checked total may get before Settings verifies it again. */
-        const val STORAGE_RECHECK_MILLIS = 60L * 60L * 1000L
+        const val STORAGE_RECHECK_MILLIS = 24L * 60L * 60L * 1000L
     }
 }
