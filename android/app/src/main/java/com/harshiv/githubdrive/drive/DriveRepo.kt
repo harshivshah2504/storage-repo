@@ -29,6 +29,39 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         return Pair(archives, hasMore)
     }
 
+    /** What the storage holds in total, counted across every page of releases. */
+    data class Usage(val archives: Int, val files: Int, val bytes: Long)
+
+    /**
+     * Adds up everything stored.
+     *
+     * There is no cheap answer to this: a repository's reported size does not include release
+     * assets, which is where every file here lives, so the only way to know is to walk the
+     * releases. At a hundred per page that is one request for most people.
+     *
+     * The total is what the storage actually costs - manifests, covers and previews included -
+     * rather than only the bytes of the files that were picked.
+     */
+    suspend fun usage(): Usage {
+        var archives = 0
+        var files = 0
+        var bytes = 0L
+        var page = 1
+        while (page <= MAX_USAGE_PAGES) {
+            val (releases, hasMore) = client.listReleasesPage(page, 100)
+            for (release in releases) {
+                val meta = Format.decodeArchiveBody(release.optString("body")) ?: continue
+                val summary = ArchiveSummary.from(release, meta)
+                archives++
+                files += summary.totalItems
+                bytes += summary.totalAssetBytes
+            }
+            if (!hasMore) break
+            page++
+        }
+        return Usage(archives, files, bytes)
+    }
+
     // ------------------------------------------------------------------ one archive
 
     /**
@@ -382,5 +415,8 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
          * worth on a phone connection. The file is still listed and still downloadable in full.
          */
         private const val THUMB_SOURCE_MAX_BYTES = 40L * 1024L * 1024L
+
+        /** 5,000 archives is far past anything real; the cap only stops a runaway loop. */
+        private const val MAX_USAGE_PAGES = 50
     }
 }

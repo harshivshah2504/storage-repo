@@ -82,6 +82,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Archives already opened this session, so reopening one is instant. */
     private val details = HashMap<Long, ArchiveDetail>()
 
+    var usage by mutableStateOf<DriveRepo.Usage?>(null)
+        private set
+    var usageLoading by mutableStateOf(false)
+        private set
+
     /** Thumbnail bytes keyed by asset id; null means "looked and there isn't one". */
     val thumbs = mutableStateMapOf<Long, ByteArray?>()
 
@@ -155,14 +160,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val user = whileNetworkReturns { probe.viewerLogin() }
                 probe.owner = user
 
-                if (!prefs.hasRepoName) {
-                    // Storage is named after the account now. An install that predates that keeps
-                    // whatever it already had, and a fresh sign-in on an account that used the old
-                    // name adopts it rather than opening an empty second storage beside the files.
-                    probe.repo = Prefs.LEGACY_REPO
-                    val legacyExists = whileNetworkReturns { probe.repoExists() }
-                    prefs.repoName = if (legacyExists) Prefs.LEGACY_REPO else Prefs.defaultRepoFor(user)
-                }
+                // Storage is named after the account: <login>-storage, created if it is not there.
+                if (!prefs.hasRepoName) prefs.repoName = Prefs.defaultRepoFor(user)
                 probe.repo = prefs.repoName
                 whileNetworkReturns { probe.ensureRepo(private = true) }
 
@@ -230,6 +229,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         covers.clear()
         thumbs.clear()
         details.clear()
+        usage = null
         archives = emptyList()
         detail = null
         signedIn = false
@@ -243,6 +243,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshArchives() {
         val repo = repo() ?: return
         details.clear()
+        usage = null
         page = 1
         archivesLoading = true
         archivesError = null
@@ -347,6 +348,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun thumbFor(entry: ArchiveEntry): ByteArray? = entry.thumbKey?.let { thumbs[it] }
 
     /**
+     * Adds up what the storage holds. Walks every page, so it is asked for when Settings opens
+     * rather than kept live behind the grid.
+     */
+    fun loadUsage(force: Boolean = false) {
+        if (usageLoading) return
+        if (usage != null && !force) return
+        val repo = repo() ?: return
+        usageLoading = true
+        viewModelScope.launch {
+            try {
+                usage = repo.usage()
+            } catch (e: Exception) {
+                usage = null
+            } finally {
+                usageLoading = false
+            }
+        }
+    }
+
+    /**
      * Opening an archive shows whatever was loaded last time straight away, so going back and
      * forth between the grid and a folder costs nothing after the first visit. [refreshArchives]
      * and any upload or delete clear it.
@@ -390,6 +411,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 archives = archives.filterNot { it.releaseId == summary.releaseId }
                 covers.remove(summary.releaseId)
                 details.remove(summary.releaseId)
+                usage = null
                 banner = "Deleted ${summary.sourceName}"
             } catch (e: Exception) {
                 banner = friendly(e)
