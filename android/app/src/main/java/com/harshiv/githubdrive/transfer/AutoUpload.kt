@@ -13,10 +13,12 @@ import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.harshiv.githubdrive.GdApp
@@ -54,9 +56,6 @@ object AutoUpload {
 
     private const val NOTIFICATION_ID = 4211
 
-    /** Marks the immediate runs, so only the scheduled one books the following night. */
-    private const val TAG_CONTINUATION = "gallery-backup-immediate"
-
     /**
      * Puts the nightly run in the calendar. Safe to call repeatedly.
      *
@@ -74,9 +73,9 @@ object AutoUpload {
             return
         }
 
-        work.enqueueUniqueWork(
+        work.enqueueUniquePeriodicWork(
             WORK_NAME,
-            if (force) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
+            if (force) ExistingPeriodicWorkPolicy.UPDATE else ExistingPeriodicWorkPolicy.KEEP,
             nightlyRequest(prefs.autoUploadWifiOnly)
         )
     }
@@ -90,7 +89,6 @@ object AutoUpload {
         val request = OneTimeWorkRequestBuilder<Worker>()
             .setConstraints(constraints(prefs.autoUploadWifiOnly))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
-            .addTag(TAG_CONTINUATION)
             .build()
 
         WorkManager.getInstance(app)
@@ -98,16 +96,17 @@ object AutoUpload {
     }
 
     /**
-     * One run, delayed until the next midnight.
+     * A daily run, first due at the next midnight.
      *
-     * Each run books the following night at the end of itself rather than repeating on a period,
-     * so the target stays midnight instead of drifting by however long the previous backup took.
-     * WorkManager will not fire to the second - Doze holds jobs until a maintenance window, and
-     * the network and battery constraints have to be met too - so this means "overnight", not
-     * "at 00:00:00".
+     * WorkManager owns the repeat rather than each run booking the next one: re-enqueuing the same
+     * unique name from inside the worker would cancel the very run doing the enqueuing.
+     *
+     * It will not fire to the second either way. Doze holds jobs until a maintenance window and
+     * the Wi-Fi and battery constraints have to be met, so this means "overnight", not "at
+     * 00:00:00" - which for a backup is the better behaviour anyway.
      */
     private fun nightlyRequest(wifiOnly: Boolean) =
-        OneTimeWorkRequestBuilder<Worker>()
+        PeriodicWorkRequestBuilder<Worker>(24, TimeUnit.HOURS)
             .setInitialDelay(millisUntilMidnight(), TimeUnit.MILLISECONDS)
             .setConstraints(constraints(wifiOnly))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.MINUTES)
@@ -168,10 +167,6 @@ object AutoUpload {
             val app = applicationContext as GdApp
             val prefs = app.prefs
 
-            // Tonight's run books tomorrow's before anything else, so a failure part way through
-            // cannot take the whole schedule down with it.
-            if (!isContinuation()) scheduleNextNight(prefs)
-
             if (!prefs.autoUpload) return Result.success()
             if (!canReadGallery(applicationContext)) return Result.success()
             val token = prefs.token ?: return Result.success()
@@ -206,18 +201,6 @@ object AutoUpload {
             // wake-up open, hand the rest to a fresh run under the same constraints.
             if (pending.size >= BATCH) runNow(applicationContext)
             return Result.success()
-        }
-
-        /** True for the immediate follow-up runs, which must not re-book tomorrow night. */
-        private fun isContinuation(): Boolean = tags.contains(TAG_CONTINUATION)
-
-        private fun scheduleNextNight(prefs: com.harshiv.githubdrive.core.Prefs) {
-            if (!prefs.autoUpload || !prefs.isSignedIn) return
-            WorkManager.getInstance(applicationContext).enqueueUniqueWork(
-                WORK_NAME,
-                ExistingWorkPolicy.REPLACE,
-                nightlyRequest(prefs.autoUploadWifiOnly)
-            )
         }
 
         private fun foregroundInfo(): ForegroundInfo {
