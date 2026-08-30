@@ -69,6 +69,11 @@ class Prefs(context: Context) {
         storedBytes = storedBytes + delta
     }
 
+    /** When the running total was last checked against what is really stored. */
+    var storageCheckedAt: Long
+        get() = prefs.getLong(KEY_STORAGE_CHECKED_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_STORAGE_CHECKED_AT, value).apply()
+
     // ------------------------------------------------------------------ gallery backup
 
     var autoUpload: Boolean
@@ -159,6 +164,7 @@ class Prefs(context: Context) {
         private const val KEY_REPO_OWNER = "repo_owner"
         private const val KEY_REPO_NAME = "repo_name"
         private const val KEY_STORED_BYTES = "stored_bytes"
+        private const val KEY_STORAGE_CHECKED_AT = "storage_checked_at"
         private const val KEY_AUTO_UPLOAD = "auto_upload"
         private const val KEY_AUTO_UPLOAD_WIFI = "auto_upload_wifi_only"
         private const val KEY_AUTO_UPLOAD_SINCE = "auto_upload_since"

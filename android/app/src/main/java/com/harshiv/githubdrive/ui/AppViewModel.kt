@@ -353,12 +353,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * would drift low forever. The walk costs one request and no waiting - nothing on screen is
      * blocked on it, the number simply corrects itself if it was wrong.
      */
-    fun refreshStorageUsed() {
+    fun refreshStorageUsed(force: Boolean = false) {
         storedBytes = prefs.storedBytes
+
+        // Opening Settings twice in a minute should not walk the releases twice. The counter is
+        // already right for anything this phone did; the walk is only there to catch what it
+        // could not see, and that does not change by the minute.
+        val age = System.currentTimeMillis() - prefs.storageCheckedAt
+        if (!force && age < STORAGE_RECHECK_MILLIS) return
+
         val repo = repo() ?: return
         viewModelScope.launch {
             runCatching { repo.totalBytes() }.onSuccess { actual ->
                 prefs.storedBytes = actual
+                prefs.storageCheckedAt = System.currentTimeMillis()
                 storedBytes = actual
             }
         }
@@ -481,10 +489,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val message = e.message ?: "Something went wrong."
         return when {
             message.contains("401") -> "GitHub rejected the sign-in. Sign out and sign in again."
-            message.contains("404") -> "That storage repository is gone. Check Settings."
+            message.contains("404") -> "That storage is gone. Check Settings."
             message.contains("rate limit", ignoreCase = true) ->
                 "GitHub is rate limiting this account. Try again in a few minutes."
             else -> message
         }
+    }
+
+    private companion object {
+        /** How stale the checked total may get before Settings verifies it again. */
+        const val STORAGE_RECHECK_MILLIS = 60L * 60L * 1000L
     }
 }
