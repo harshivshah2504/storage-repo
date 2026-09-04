@@ -393,6 +393,116 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
     // ------------------------------------------------------------------ mutate
 
     /**
+     * Renames or moves files inside an archive, by path.
+     *
+     * Nothing is transferred. Readers join manifest items to assets by `asset_name` and show
+     * `relative_path`, so a rename or a move between folders is a rewrite of the manifest and
+     * nothing more - a two-gigabyte video moves folder as fast as a text file.
+     *
+     * Previews are the one exception: their asset name is derived from the file's path, so each
+     * one is renamed alongside, otherwise the thumbnail would go missing from its own file.
+     */
+    suspend fun rewritePaths(
+        detail: ArchiveDetail,
+        mapping: Map<String, String>
+    ) = withContext(Dispatchers.IO) {
+        if (detail.encrypted) throw EncryptedArchiveException()
+        if (detail.storageMode == Format.STORAGE_MODE_BUNDLE_ASSETS) {
+            throw IllegalStateException("Files inside a bundled archive cannot be moved or renamed.")
+        }
+        if (mapping.isEmpty()) return@withContext
+
+        val files = detail.entries.filterNot { it.isFolder }
+        val moved = files.map { entry ->
+            val target = mapping[entry.relativePath] ?: return@map entry
+            entry.copy(relativePath = Format.safeRelativePath(target))
+        }
+
+        val paths = moved.map { it.relativePath }
+        require(paths.size == paths.toSet().size) { "Another file here already has that name." }
+
+        for (entry in moved) {
+            val old = files.firstOrNull { it.order == entry.order } ?: continue
+            if (old.relativePath == entry.relativePath) continue
+            val thumb = old.thumbAsset ?: continue
+            runCatching {
+                client.renameAsset(thumb.id, Format.thumbAssetNameFor(entry.order, entry.relativePath))
+            }
+        }
+
+        val summary = detail.summary
+        val manifest = Manifest.payload(
+            archiveId = summary.archiveId,
+            createdAt = summary.createdAt,
+            sourceName = summary.sourceName,
+            sourceType = summary.sourceType,
+            totalItems = moved.size,
+            items = moved.map { Manifest.itemFrom(it) }
+        )
+
+        client.listReleaseAssets(summary.releaseId)
+            .firstOrNull { it.optString("name") == Format.MANIFEST_ASSET_NAME }
+            ?.let { stale -> runCatching { client.deleteAsset(stale.optLong("id")) } }
+
+        client.uploadAssetBytes(
+            releaseId = summary.releaseId,
+            assetName = Format.MANIFEST_ASSET_NAME,
+            payload = PyJson.indented(manifest).toByteArray(Charsets.UTF_8),
+            contentType = "application/json"
+        )
+
+        val folders = sortedSetOf<String>()
+        for (folder in detail.virtualFolders) {
+            folders.addAll(Format.folderAncestors(remapFolder(folder, mapping)))
+        }
+        for (path in paths) {
+            if (!path.contains('/')) continue
+            folders.addAll(Format.folderAncestors(path.substringBeforeLast('/')))
+        }
+
+        client.updateRelease(
+            summary.releaseId,
+            Format.titleFor(summary.sourceName, moved.size),
+            Format.encodeArchiveBody(archiveMeta(summary, paths, folders.toList()))
+        )
+    }
+
+    /** A folder follows whatever happened to the files inside it. */
+    private fun remapFolder(folder: String, mapping: Map<String, String>): String {
+        for ((from, to) in mapping) {
+            val fromParent = from.substringBeforeLast('/', "")
+            val toParent = to.substringBeforeLast('/', "")
+            if (fromParent.isEmpty() || fromParent == toParent) continue
+            if (folder == fromParent) return toParent
+            if (folder.startsWith("$fromParent/")) return toParent + folder.removePrefix(fromParent)
+        }
+        return folder
+    }
+
+    private fun archiveMeta(
+        summary: ArchiveSummary,
+        paths: List<String>,
+        virtualFolders: List<String>
+    ): LinkedHashMap<String, Any?> {
+        val meta = LinkedHashMap<String, Any?>()
+        meta["storage_format"] = Format.STORAGE_FORMAT
+        meta["metadata_version"] = Format.METADATA_VERSION
+        meta["created_at"] = summary.createdAt
+        meta["source_name"] = summary.sourceName
+        meta["source_type"] = summary.sourceType
+        meta["source_path"] = summary.sourceName
+        meta["total_items"] = paths.size
+        meta["encrypted"] = false
+        meta["storage_mode"] = Format.STORAGE_MODE_FILE_ASSETS
+        meta["kinds"] = Format.classifyCounts(paths)
+        meta["cover_asset_name"] =
+            if (paths.any { Format.isVisual(it) }) Format.COVER_ASSET_NAME else null
+        if (virtualFolders.isNotEmpty()) meta["virtual_folders"] = virtualFolders
+        meta["archive_id"] = summary.archiveId
+        return meta
+    }
+
+    /**
      * Removes files from an archive.
      *
      * Deleting the assets alone would be enough for every reader - the spec drops manifest items
@@ -453,26 +563,10 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
             contentType = "application/json"
         )
 
-        val meta = LinkedHashMap<String, Any?>()
-        meta["storage_format"] = Format.STORAGE_FORMAT
-        meta["metadata_version"] = Format.METADATA_VERSION
-        meta["created_at"] = summary.createdAt
-        meta["source_name"] = summary.sourceName
-        meta["source_type"] = summary.sourceType
-        meta["source_path"] = summary.sourceName
-        meta["total_items"] = survivors.size
-        meta["encrypted"] = false
-        meta["storage_mode"] = Format.STORAGE_MODE_FILE_ASSETS
-        meta["kinds"] = Format.classifyCounts(paths)
-        meta["cover_asset_name"] =
-            if (paths.any { Format.isVisual(it) }) Format.COVER_ASSET_NAME else null
-        if (detail.virtualFolders.isNotEmpty()) meta["virtual_folders"] = detail.virtualFolders
-        meta["archive_id"] = summary.archiveId
-
         client.updateRelease(
             summary.releaseId,
             Format.titleFor(summary.sourceName, survivors.size),
-            Format.encodeArchiveBody(meta)
+            Format.encodeArchiveBody(archiveMeta(summary, paths, detail.virtualFolders))
         )
         false
     }

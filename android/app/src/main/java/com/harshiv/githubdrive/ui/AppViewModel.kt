@@ -380,6 +380,86 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Every folder that exists inside the open archive, for picking a destination. */
+    fun foldersInArchive(): List<String> {
+        val current = detail ?: return emptyList()
+        val out = sortedSetOf<String>()
+        out.addAll(current.virtualFolders)
+        for (entry in current.entries) {
+            if (entry.isFolder) out.add(entry.relativePath)
+            val parent = entry.relativePath.substringBeforeLast('/', "")
+            if (parent.isNotEmpty()) out.add(parent)
+        }
+        return out.toList()
+    }
+
+    /**
+     * Moves the ticked files into [folder] - empty means the top of the archive.
+     *
+     * Nothing is transferred: the archive records where a file lives, so moving a two-gigabyte
+     * video is the same amount of work as moving a note.
+     */
+    fun moveSelected(folder: String) {
+        val entries = selectedEntries().filterNot { it.isFolder }
+        val target = folder.trim().trim('/')
+        clearSelection()
+        if (entries.isEmpty()) return
+
+        val mapping = entries.associate { entry ->
+            val name = entry.relativePath.substringAfterLast('/')
+            entry.relativePath to if (target.isEmpty()) name else "$target/$name"
+        }.filter { (from, to) -> from != to }
+        applyRewrite(mapping, "Moved ${entries.size} file${if (entries.size == 1) "" else "s"}")
+    }
+
+    /** Renames one file, or one folder and everything under it. */
+    fun renameSelected(newName: String) {
+        val current = detail ?: return
+        val entry = selectedEntries().firstOrNull() ?: return
+        val clean = newName.trim().trim('/')
+        clearSelection()
+        if (clean.isEmpty() || clean.contains('/')) {
+            banner = "That name cannot be used."
+            return
+        }
+
+        val parent = entry.relativePath.substringBeforeLast('/', "")
+        val renamed = if (parent.isEmpty()) clean else "$parent/$clean"
+
+        val mapping = if (entry.isFolder) {
+            // A folder is only ever the shape of the paths under it, so renaming one means
+            // rewriting every path that starts with it.
+            val prefix = entry.relativePath + "/"
+            current.entries
+                .filterNot { it.isFolder }
+                .filter { it.relativePath.startsWith(prefix) }
+                .associate { it.relativePath to renamed + "/" + it.relativePath.removePrefix(prefix) }
+        } else {
+            mapOf(entry.relativePath to renamed)
+        }
+        applyRewrite(mapping, "Renamed to $clean")
+    }
+
+    private fun applyRewrite(mapping: Map<String, String>, done: String) {
+        val repo = repo() ?: return
+        val current = detail ?: return
+        if (mapping.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                repo.rewritePaths(current, mapping)
+                details.remove(current.summary.releaseId)
+                val reloaded = repo.loadDetail(current.summary)
+                details[current.summary.releaseId] = reloaded
+                detail = reloaded
+                banner = done
+                refreshArchives()
+            } catch (e: Exception) {
+                banner = friendly(e)
+            }
+        }
+    }
+
     /** Removes every ticked file from the open archive. */
     fun deleteSelected() {
         val repo = repo() ?: return

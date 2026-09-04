@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -38,6 +39,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DriveFileMove
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Inbox
@@ -65,6 +68,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -289,6 +293,8 @@ fun BrowseScreen(
     val title = detail?.summary?.sourceName ?: "Opening..."
     val selecting = vm.selected.isNotEmpty()
     var confirmDelete by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -328,6 +334,14 @@ fun BrowseScreen(
                 },
                 actions = {
                     if (selecting) {
+                        if (vm.selected.size == 1) {
+                            IconButton(onClick = { renaming = true }) {
+                                Icon(Icons.Filled.DriveFileRenameOutline, contentDescription = "Rename")
+                            }
+                        }
+                        IconButton(onClick = { moving = true }) {
+                            Icon(Icons.Filled.DriveFileMove, contentDescription = "Move selected")
+                        }
                         IconButton(onClick = { onSaveMany() }) {
                             Icon(Icons.Filled.Download, contentDescription = "Save selected")
                         }
@@ -431,6 +445,25 @@ fun BrowseScreen(
         }
     }
 
+    if (renaming) {
+        val entry = detail?.entries?.firstOrNull { it.relativePath == vm.selected.firstOrNull() }
+        TextPromptDialog(
+            title = if (entry?.isFolder == true) "Rename folder" else "Rename file",
+            initial = entry?.name.orEmpty(),
+            confirm = "Rename",
+            onDismiss = { renaming = false },
+            onConfirm = { name -> renaming = false; vm.renameSelected(name) }
+        )
+    }
+
+    if (moving) {
+        MoveDialog(
+            folders = vm.foldersInArchive(),
+            onDismiss = { moving = false },
+            onMove = { folder -> moving = false; vm.moveSelected(folder) }
+        )
+    }
+
     if (confirmDelete) {
         val count = vm.selected.size
         AlertDialog(
@@ -449,6 +482,88 @@ fun BrowseScreen(
             }
         )
     }
+}
+
+/** A single-field prompt, used for renaming and for naming a new folder. */
+@Composable
+private fun TextPromptDialog(
+    title: String,
+    initial: String,
+    confirm: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(text) },
+                enabled = text.isNotBlank()
+            ) { Text(confirm) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/**
+ * Where to move the picked files.
+ *
+ * Nothing is transferred by a move - the archive only records where a file sits - so this is a
+ * list of the folders that already exist, plus the top of the archive and a new one.
+ */
+@Composable
+private fun MoveDialog(
+    folders: List<String>,
+    onDismiss: () -> Unit,
+    onMove: (String) -> Unit
+) {
+    var naming by remember { mutableStateOf(false) }
+
+    if (naming) {
+        TextPromptDialog(
+            title = "New folder",
+            initial = "",
+            confirm = "Move here",
+            onDismiss = { naming = false },
+            onConfirm = { name -> naming = false; onMove(name) }
+        )
+        return
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move to") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                item {
+                    ListItem(
+                        headlineContent = { Text("Top of this archive") },
+                        leadingContent = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                        modifier = Modifier.clickable { onMove("") }
+                    )
+                }
+                items(folders, key = { it }) { folder ->
+                    ListItem(
+                        headlineContent = { Text(folder, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingContent = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                        modifier = Modifier.clickable { onMove(folder) }
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { naming = true }) { Text("New folder") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable

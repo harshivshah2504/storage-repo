@@ -363,6 +363,11 @@ class GitHubClient(
         return null
     }
 
+    /** Renames a release asset in place. Used to keep a preview's name matching its file. */
+    suspend fun renameAsset(assetId: Long, newName: String): JSONObject = withContext(Dispatchers.IO) {
+        sendJson("PATCH", "$repoPath/releases/assets/$assetId", JSONObject().put("name", newName))
+    }
+
     suspend fun deleteAsset(assetId: Long) = withContext(Dispatchers.IO) {
         val request = Request.Builder().url("$repoPath/releases/assets/$assetId")
             .headers(baseHeaders()).delete().build()
