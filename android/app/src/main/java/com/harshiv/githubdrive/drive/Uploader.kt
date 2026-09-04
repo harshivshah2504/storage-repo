@@ -144,7 +144,7 @@ class Uploader(
         existingAssets[Format.MANIFEST_ASSET_NAME]?.let { stale ->
             runCatching { client.deleteAsset(stale.optLong("id")) }
         }
-        val manifest = buildManifest(
+        val manifest = Manifest.payload(
             archiveId, createdAt, sourceName, sourceType, manifestItems.size, manifestItems
         )
         client.uploadAssetBytes(
@@ -216,7 +216,7 @@ class Uploader(
             sha = ""
             parts = plan.map { chunk ->
                 val asset = existingAssets.getValue(chunk.assetName)
-                partMap(chunk.index, chunk.assetName, asset.optLong("id"), asset.optLong("size", 0L))
+                Manifest.part(chunk.index, chunk.assetName, asset.optLong("id"), asset.optLong("size", 0L))
             }
             bytesSent += item.size
         } else {
@@ -228,7 +228,7 @@ class Uploader(
                 val already = existingAssets[chunk.assetName]
                 if (already != null) {
                     built.add(
-                        partMap(
+                        Manifest.part(
                             chunk.index,
                             chunk.assetName,
                             already.optLong("id"),
@@ -251,7 +251,7 @@ class Uploader(
                     }
                 ) { openAt(item.uri, chunk.offset) }
                 built.add(
-                    partMap(
+                    Manifest.part(
                         chunk.index,
                         chunk.assetName,
                         asset.optLong("id"),
@@ -267,7 +267,7 @@ class Uploader(
 
         return EntryResult(
             bytesSent = bytesSent,
-            manifestItem = itemMap(
+            manifestItem = Manifest.item(
                 order = order,
                 assetName = plan[0].assetName,
                 assetId = (parts[0]["asset_id"] as Number).toLong(),
@@ -348,64 +348,6 @@ class Uploader(
             out.addAll(Format.folderAncestors(path.substringBeforeLast('/')))
         }
         return out.toList()
-    }
-
-    private fun buildManifest(
-        archiveId: String,
-        createdAt: String,
-        sourceName: String,
-        sourceType: String,
-        totalItems: Int,
-        items: List<Map<String, Any?>>
-    ): LinkedHashMap<String, Any?> {
-        val manifest = LinkedHashMap<String, Any?>()
-        manifest["storage_format"] = Format.STORAGE_FORMAT
-        manifest["metadata_version"] = Format.METADATA_VERSION
-        manifest["archive_id"] = archiveId
-        manifest["created_at"] = createdAt
-        manifest["source_name"] = sourceName
-        manifest["source_type"] = sourceType
-        manifest["source_path"] = sourceName
-        manifest["total_items"] = totalItems
-        manifest["encrypted"] = false
-        manifest["storage_mode"] = Format.STORAGE_MODE_FILE_ASSETS
-        manifest["items"] = items
-        return manifest
-    }
-
-    /** `ArchiveItem` field order, which `asdict` preserves on the wire. */
-    private fun itemMap(
-        order: Int,
-        assetName: String,
-        assetId: Long,
-        relativePath: String,
-        originalSize: Long,
-        sha256: String,
-        contentType: String,
-        parts: List<Map<String, Any?>>
-    ): LinkedHashMap<String, Any?> {
-        val item = LinkedHashMap<String, Any?>()
-        item["order"] = order
-        item["asset_name"] = assetName
-        item["asset_id"] = assetId
-        item["relative_path"] = relativePath
-        item["original_size"] = originalSize
-        item["source_sha256"] = sha256
-        item["encrypted"] = false
-        item["content_type"] = contentType
-        item["parts"] = parts
-        item["members"] = emptyList<Any?>()
-        return item
-    }
-
-    /** Fresh uploads write parts as order, asset_name, asset_id, size - in that order. */
-    private fun partMap(order: Int, assetName: String, assetId: Long, size: Long): LinkedHashMap<String, Any?> {
-        val part = LinkedHashMap<String, Any?>()
-        part["order"] = order
-        part["asset_name"] = assetName
-        part["asset_id"] = assetId
-        part["size"] = size
-        return part
     }
 
     // ------------------------------------------------------------------ chunking + io

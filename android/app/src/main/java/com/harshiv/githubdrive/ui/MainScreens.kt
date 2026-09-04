@@ -1,11 +1,16 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class
+)
 
 package com.harshiv.githubdrive.ui
 
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
@@ -40,6 +47,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.automirrored.filled.ViewList
@@ -274,40 +282,71 @@ private fun ArchiveCard(
 fun BrowseScreen(
     vm: AppViewModel,
     onBack: () -> Unit,
-    onSave: (ArchiveEntry) -> Unit
+    onSave: (ArchiveEntry) -> Unit,
+    onSaveMany: () -> Unit
 ) {
     val detail = vm.detail
     val title = detail?.summary?.sourceName ?: "Opening..."
+    val selecting = vm.selected.isNotEmpty()
+    var confirmDelete by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (vm.currentPath.isNotEmpty()) {
-                            Text(
-                                vm.currentPath,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                    if (selecting) {
+                        Text("${vm.selected.size} selected")
+                    } else {
+                        Column {
+                            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (vm.currentPath.isNotEmpty()) {
+                                Text(
+                                    vm.currentPath,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = { if (!vm.goUp()) onBack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    IconButton(
+                        onClick = {
+                            when {
+                                selecting -> vm.clearSelection()
+                                !vm.goUp() -> onBack()
+                            }
+                        }
+                    ) {
+                        Icon(
+                            if (selecting) Icons.Filled.Close else Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = if (selecting) "Cancel selection" else "Back"
+                        )
                     }
                 },
                 actions = {
-                    val tiled = vm.browseView == BrowseView.TILE
-                    IconButton(onClick = { vm.toggleBrowseView() }) {
-                        Icon(
-                            if (tiled) Icons.AutoMirrored.Filled.ViewList else Icons.Filled.GridView,
-                            contentDescription = if (tiled) "Show as a list" else "Show as tiles"
-                        )
+                    if (selecting) {
+                        IconButton(onClick = { onSaveMany() }) {
+                            Icon(Icons.Filled.Download, contentDescription = "Save selected")
+                        }
+                        IconButton(onClick = { confirmDelete = true }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+                        }
+                        IconButton(
+                            onClick = { vm.selectAll(detail?.childrenOf(vm.currentPath).orEmpty()) }
+                        ) {
+                            Icon(Icons.Filled.SelectAll, contentDescription = "Select all here")
+                        }
+                    } else {
+                        val tiled = vm.browseView == BrowseView.TILE
+                        IconButton(onClick = { vm.toggleBrowseView() }) {
+                            Icon(
+                                if (tiled) Icons.AutoMirrored.Filled.ViewList else Icons.Filled.GridView,
+                                contentDescription = if (tiled) "Show as a list" else "Show as tiles"
+                            )
+                        }
                     }
                 }
             )
@@ -336,8 +375,17 @@ fun BrowseScreen(
                             subtitle = "There is nothing stored here."
                         )
                     } else {
+                        // While anything is ticked, a tap ticks instead of opening - the usual
+                        // gallery behaviour, and it stops a stray tap leaving the screen.
                         val open: (ArchiveEntry) -> Unit = { entry ->
-                            if (entry.isFolder) vm.enterFolder(entry.relativePath) else onSave(entry)
+                            when {
+                                selecting && !entry.isFolder -> vm.toggleSelected(entry)
+                                entry.isFolder -> vm.enterFolder(entry.relativePath)
+                                else -> onSave(entry)
+                            }
+                        }
+                        val hold: (ArchiveEntry) -> Unit = { entry ->
+                            if (!entry.isFolder) vm.toggleSelected(entry)
                         }
                         when (vm.browseView) {
                             BrowseView.LIST -> LazyColumn(Modifier.fillMaxSize()) {
@@ -345,7 +393,13 @@ fun BrowseScreen(
                                     item { EncryptedNotice() }
                                 }
                                 items(children, key = { it.relativePath }) { entry ->
-                                    EntryRow(entry, vm, onClick = { open(entry) })
+                                    EntryRow(
+                                        entry = entry,
+                                        vm = vm,
+                                        selected = entry.relativePath in vm.selected,
+                                        onClick = { open(entry) },
+                                        onLongClick = { hold(entry) }
+                                    )
                                     HorizontalDivider()
                                 }
                             }
@@ -361,7 +415,13 @@ fun BrowseScreen(
                                     item(span = { GridItemSpan(maxLineSpan) }) { EncryptedNotice() }
                                 }
                                 items(children, key = { it.relativePath }) { entry ->
-                                    EntryTile(entry, vm, onClick = { open(entry) })
+                                    EntryTile(
+                                        entry = entry,
+                                        vm = vm,
+                                        selected = entry.relativePath in vm.selected,
+                                        onClick = { open(entry) },
+                                        onLongClick = { hold(entry) }
+                                    )
                                 }
                             }
                         }
@@ -369,6 +429,25 @@ fun BrowseScreen(
                 }
             }
         }
+    }
+
+    if (confirmDelete) {
+        val count = vm.selected.size
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete $count file${if (count == 1) "" else "s"}?") },
+            text = {
+                Text(
+                    "They will be removed from this archive in your storage. This cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; vm.deleteSelected() }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            }
+        )
     }
 }
 
@@ -395,16 +474,40 @@ private fun rememberThumb(entry: ArchiveEntry, vm: AppViewModel): ByteArray? {
 }
 
 @Composable
-private fun EntryTile(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit) {
+private fun EntryTile(
+    entry: ArchiveEntry,
+    vm: AppViewModel,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
     val thumb = rememberThumb(entry, vm)
     Column(
-        modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable { onClick() }
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
-        CoverThumb(
-            bytes = thumb,
-            fallbackKind = entry.kind,
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp))
-        )
+        Box {
+            CoverThumb(
+                bytes = thumb,
+                fallbackKind = entry.kind,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp))
+            )
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                )
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp)
+                )
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Text(
             entry.name,
@@ -424,7 +527,13 @@ private fun EntryTile(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit
 }
 
 @Composable
-private fun EntryRow(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit) {
+private fun EntryRow(
+    entry: ArchiveEntry,
+    vm: AppViewModel,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
     val thumb = rememberThumb(entry, vm)
     ListItem(
         headlineContent = {
@@ -437,14 +546,18 @@ private fun EntryRow(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit)
             )
         },
         leadingContent = {
-            if (thumb != null) {
-                CoverThumb(
+            when {
+                selected -> Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                thumb != null -> CoverThumb(
                     bytes = thumb,
                     fallbackKind = entry.kind,
                     modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp))
                 )
-            } else {
-                Icon(
+                else -> Icon(
                     iconForKind(entry.kind),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -452,7 +565,7 @@ private fun EntryRow(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit)
             }
         },
         trailingContent = {
-            if (!entry.isFolder) {
+            if (!entry.isFolder && !selected) {
                 Icon(
                     Icons.Filled.Download,
                     contentDescription = "Save",
@@ -460,7 +573,7 @@ private fun EntryRow(entry: ArchiveEntry, vm: AppViewModel, onClick: () -> Unit)
                 )
             }
         },
-        modifier = Modifier.clickable { onClick() }
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
     )
 }
 

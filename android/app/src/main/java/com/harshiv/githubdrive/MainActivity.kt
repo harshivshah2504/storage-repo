@@ -137,6 +137,13 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         if (uri != null && entry != null) vm.download(entry, uri)
     }
 
+    // Saving several files asks for a folder once, rather than a save dialog per file.
+    val saveIntoFolder = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) vm.downloadSelected(uri)
+    }
+
     // Anything shared in from another app queues as soon as we have a signed-in session.
     LaunchedEffect(vm.signedIn, pendingShareCount) {
         if (vm.signedIn && pendingShareCount > 0) {
@@ -185,7 +192,8 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
             onSave = { entry ->
                 pendingSave = entry
                 saveFile.launch(entry.name)
-            }
+            },
+            onSaveMany = { saveIntoFolder.launch(null) }
         )
 
         Screen.TRANSFERS -> TransfersScreen(

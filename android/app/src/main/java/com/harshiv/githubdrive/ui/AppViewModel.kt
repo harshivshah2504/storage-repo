@@ -3,6 +3,7 @@ package com.harshiv.githubdrive.ui
 import android.app.Application
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -11,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.harshiv.githubdrive.BuildConfig
 import com.harshiv.githubdrive.GdApp
 import com.harshiv.githubdrive.core.Prefs
+import androidx.documentfile.provider.DocumentFile
 import com.harshiv.githubdrive.drive.ArchiveDetail
 import com.harshiv.githubdrive.drive.ArchiveEntry
 import com.harshiv.githubdrive.drive.ArchiveSummary
@@ -73,6 +75,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var currentPath by mutableStateOf("")
         private set
+
+    /** Files ticked inside the open archive, by path. Empty means selection mode is off. */
+    val selected = mutableStateListOf<String>()
 
     var banner by mutableStateOf<String?>(null)
 
@@ -328,6 +333,87 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         AutoUpload.sync(getApplication(), force = true)
     }
 
+    fun toggleSelected(entry: ArchiveEntry) {
+        if (!selected.remove(entry.relativePath)) selected.add(entry.relativePath)
+    }
+
+    fun clearSelection() = selected.clear()
+
+    fun selectAll(entries: List<ArchiveEntry>) {
+        selected.clear()
+        selected.addAll(entries.filterNot { it.isFolder }.map { it.relativePath })
+    }
+
+    private fun selectedEntries(): List<ArchiveEntry> {
+        val chosen = selected.toSet()
+        return detail?.entries.orEmpty().filter { it.relativePath in chosen }
+    }
+
+    /** Saves every ticked file into a folder the person picked. */
+    fun downloadSelected(treeUri: Uri) {
+        val repo = repo() ?: return
+        val context = getApplication<Application>()
+        val entries = selectedEntries().filterNot { it.isFolder }
+        clearSelection()
+        if (entries.isEmpty()) return
+
+        viewModelScope.launch {
+            val tree = withContext(Dispatchers.IO) { DocumentFile.fromTreeUri(context, treeUri) }
+            if (tree == null) {
+                banner = "Could not open that folder."
+                return@launch
+            }
+            var started = 0
+            for (entry in entries) {
+                val target = withContext(Dispatchers.IO) {
+                    tree.createFile(entry.contentType.ifEmpty { "application/octet-stream" }, entry.name)
+                }
+                if (target == null) continue
+                TransferManager.startDownload(context, repo, entry, target.uri)
+                started++
+            }
+            banner = if (started == 0) {
+                "Could not save into that folder."
+            } else {
+                "Saving $started file${if (started == 1) "" else "s"}"
+            }
+        }
+    }
+
+    /** Removes every ticked file from the open archive. */
+    fun deleteSelected() {
+        val repo = repo() ?: return
+        val current = detail ?: return
+        val entries = selectedEntries().filterNot { it.isFolder }
+        clearSelection()
+        if (entries.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                val archiveGone = repo.deleteEntries(current, entries)
+                val count = entries.size
+                banner = "Deleted $count file${if (count == 1) "" else "s"}"
+                details.remove(current.summary.releaseId)
+                usageDirty()
+                if (archiveGone) {
+                    detail = null
+                    refreshArchives()
+                } else {
+                    detail = repo.loadDetail(current.summary)
+                    details[current.summary.releaseId] = detail!!
+                    refreshArchives()
+                }
+            } catch (e: Exception) {
+                banner = friendly(e)
+            }
+        }
+    }
+
+    private fun usageDirty() {
+        prefs.storageCheckedAt = 0L
+        storedBytes = prefs.storedBytes
+    }
+
     fun toggleBrowseView() {
         browseView = if (browseView == BrowseView.LIST) BrowseView.TILE else BrowseView.LIST
     }
@@ -379,6 +465,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun openArchive(summary: ArchiveSummary) {
         val repo = repo() ?: return
+        selected.clear()
         val remembered = details[summary.releaseId]
         detail = remembered
         currentPath = ""
@@ -398,11 +485,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun enterFolder(path: String) {
+        selected.clear()
         currentPath = path
     }
 
     /** Returns false when already at the archive root, so the caller can pop the back stack. */
     fun goUp(): Boolean {
+        if (selected.isNotEmpty()) {
+            selected.clear()
+            return true
+        }
         if (currentPath.isEmpty()) return false
         currentPath = currentPath.substringBeforeLast('/', "")
         return true

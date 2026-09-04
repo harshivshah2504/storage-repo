@@ -1,6 +1,7 @@
 package com.harshiv.githubdrive.drive
 
 import com.harshiv.githubdrive.core.Format
+import com.harshiv.githubdrive.core.PyJson
 import com.harshiv.githubdrive.github.GitHubClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -390,6 +391,91 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
     }
 
     // ------------------------------------------------------------------ mutate
+
+    /**
+     * Removes files from an archive.
+     *
+     * Deleting the assets alone would be enough for every reader - the spec drops manifest items
+     * whose assets have gone - but that leaves an archive claiming to hold files it does not. So
+     * the manifest is rewritten from the survivors and the release body's counts, kinds and title
+     * are recomputed. Emptying an archive deletes the release outright rather than leaving a
+     * husk behind.
+     *
+     * Bundled and encrypted archives are refused, as they are on the Python side: their files live
+     * inside one zip and cannot be removed a piece at a time.
+     */
+    suspend fun deleteEntries(
+        detail: ArchiveDetail,
+        removing: List<ArchiveEntry>
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (detail.encrypted) throw EncryptedArchiveException()
+        if (detail.storageMode == Format.STORAGE_MODE_BUNDLE_ASSETS) {
+            throw IllegalStateException("Files inside a bundled archive cannot be removed one at a time.")
+        }
+
+        val doomed = removing.filterNot { it.isFolder }.map { it.relativePath }.toSet()
+        if (doomed.isEmpty()) return@withContext false
+
+        val summary = detail.summary
+        val survivors = detail.entries.filterNot { it.isFolder || it.relativePath in doomed }
+
+        if (survivors.isEmpty()) {
+            deleteArchive(summary)
+            return@withContext true
+        }
+
+        // Assets first: once these are gone the files are gone, whatever happens next.
+        for (entry in detail.entries.filter { !it.isFolder && it.relativePath in doomed }) {
+            for (part in entry.parts) {
+                runCatching { client.deleteAsset(part.assetId) }
+            }
+            entry.thumbAsset?.let { thumb -> runCatching { client.deleteAsset(thumb.id) } }
+        }
+
+        val paths = survivors.map { it.relativePath }
+        val manifest = Manifest.payload(
+            archiveId = summary.archiveId,
+            createdAt = summary.createdAt,
+            sourceName = summary.sourceName,
+            sourceType = summary.sourceType,
+            totalItems = survivors.size,
+            items = survivors.map { Manifest.itemFrom(it) }
+        )
+
+        client.listReleaseAssets(summary.releaseId)
+            .firstOrNull { it.optString("name") == Format.MANIFEST_ASSET_NAME }
+            ?.let { stale -> runCatching { client.deleteAsset(stale.optLong("id")) } }
+
+        client.uploadAssetBytes(
+            releaseId = summary.releaseId,
+            assetName = Format.MANIFEST_ASSET_NAME,
+            payload = PyJson.indented(manifest).toByteArray(Charsets.UTF_8),
+            contentType = "application/json"
+        )
+
+        val meta = LinkedHashMap<String, Any?>()
+        meta["storage_format"] = Format.STORAGE_FORMAT
+        meta["metadata_version"] = Format.METADATA_VERSION
+        meta["created_at"] = summary.createdAt
+        meta["source_name"] = summary.sourceName
+        meta["source_type"] = summary.sourceType
+        meta["source_path"] = summary.sourceName
+        meta["total_items"] = survivors.size
+        meta["encrypted"] = false
+        meta["storage_mode"] = Format.STORAGE_MODE_FILE_ASSETS
+        meta["kinds"] = Format.classifyCounts(paths)
+        meta["cover_asset_name"] =
+            if (paths.any { Format.isVisual(it) }) Format.COVER_ASSET_NAME else null
+        if (detail.virtualFolders.isNotEmpty()) meta["virtual_folders"] = detail.virtualFolders
+        meta["archive_id"] = summary.archiveId
+
+        client.updateRelease(
+            summary.releaseId,
+            Format.titleFor(summary.sourceName, survivors.size),
+            Format.encodeArchiveBody(meta)
+        )
+        false
+    }
 
     suspend fun deleteArchive(summary: ArchiveSummary) {
         client.deleteRelease(summary.releaseId)
