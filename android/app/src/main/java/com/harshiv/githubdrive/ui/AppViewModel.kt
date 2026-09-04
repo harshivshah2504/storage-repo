@@ -76,8 +76,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var currentPath by mutableStateOf("")
         private set
 
-    /** Files ticked inside the open archive, by path. Empty means selection mode is off. */
+    /** Files ticked inside the open archive, by path. */
     val selected = mutableStateListOf<String>()
+
+    /**
+     * Whether the browse screen is picking rather than opening.
+     *
+     * Kept separately from [selected] being non-empty so that tapping Select puts the screen into
+     * picking mode with nothing chosen yet - otherwise the only way in is a long press, which
+     * nobody can see.
+     */
+    var selectionMode by mutableStateOf(false)
+        private set
 
     var banner by mutableStateOf<String?>(null)
 
@@ -333,15 +343,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         AutoUpload.sync(getApplication(), force = true)
     }
 
+    fun startSelecting() {
+        selectionMode = true
+    }
+
     fun toggleSelected(entry: ArchiveEntry) {
+        selectionMode = true
         if (!selected.remove(entry.relativePath)) selected.add(entry.relativePath)
     }
 
-    fun clearSelection() = selected.clear()
+    fun clearSelection() {
+        selected.clear()
+        selectionMode = false
+    }
 
     fun selectAll(entries: List<ArchiveEntry>) {
+        selectionMode = true
         selected.clear()
-        selected.addAll(entries.filterNot { it.isFolder }.map { it.relativePath })
+        selected.addAll(entries.map { it.relativePath })
     }
 
     private fun selectedEntries(): List<ArchiveEntry> {
@@ -349,11 +368,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return detail?.entries.orEmpty().filter { it.relativePath in chosen }
     }
 
+    /**
+     * The actual files behind a selection.
+     *
+     * A folder is only the shape of the paths under it, so picking one means picking everything
+     * it contains.
+     */
+    private fun selectedFiles(): List<ArchiveEntry> {
+        val entries = selectedEntries()
+        val files = detail?.entries.orEmpty().filterNot { it.isFolder }
+        val out = LinkedHashMap<String, ArchiveEntry>()
+        for (entry in entries) {
+            if (entry.isFolder) {
+                val prefix = entry.relativePath + "/"
+                files.filter { it.relativePath.startsWith(prefix) }
+                    .forEach { out[it.relativePath] = it }
+            } else {
+                out[entry.relativePath] = entry
+            }
+        }
+        return out.values.toList()
+    }
+
     /** Saves every ticked file into a folder the person picked. */
     fun downloadSelected(treeUri: Uri) {
         val repo = repo() ?: return
         val context = getApplication<Application>()
-        val entries = selectedEntries().filterNot { it.isFolder }
+        val entries = selectedFiles()
         clearSelection()
         if (entries.isEmpty()) return
 
@@ -400,16 +441,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * video is the same amount of work as moving a note.
      */
     fun moveSelected(folder: String) {
-        val entries = selectedEntries().filterNot { it.isFolder }
+        val picked = selectedEntries()
         val target = folder.trim().trim('/')
-        clearSelection()
-        if (entries.isEmpty()) return
+        val mapping = HashMap<String, String>()
+        val files = detail?.entries.orEmpty().filterNot { it.isFolder }
 
-        val mapping = entries.associate { entry ->
-            val name = entry.relativePath.substringAfterLast('/')
-            entry.relativePath to if (target.isEmpty()) name else "$target/$name"
-        }.filter { (from, to) -> from != to }
-        applyRewrite(mapping, "Moved ${entries.size} file${if (entries.size == 1) "" else "s"}")
+        for (entry in picked) {
+            if (entry.isFolder) {
+                // A folder keeps its shape: it and everything under it land inside the target.
+                val prefix = entry.relativePath + "/"
+                val name = entry.relativePath.substringAfterLast('/')
+                val moved = if (target.isEmpty()) name else "$target/$name"
+                files.filter { it.relativePath.startsWith(prefix) }.forEach { child ->
+                    mapping[child.relativePath] = moved + "/" + child.relativePath.removePrefix(prefix)
+                }
+            } else {
+                val name = entry.relativePath.substringAfterLast('/')
+                mapping[entry.relativePath] = if (target.isEmpty()) name else "$target/$name"
+            }
+        }
+        val count = mapping.size
+        clearSelection()
+
+        val changes = mapping.filter { (from, to) -> from != to }
+        if (changes.isEmpty()) {
+            banner = "Already there."
+            return
+        }
+        applyRewrite(changes, "Moved $count file${if (count == 1) "" else "s"}")
     }
 
     /** Renames one file, or one folder and everything under it. */
@@ -464,7 +523,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteSelected() {
         val repo = repo() ?: return
         val current = detail ?: return
-        val entries = selectedEntries().filterNot { it.isFolder }
+        val entries = selectedFiles()
         clearSelection()
         if (entries.isEmpty()) return
 
@@ -545,7 +604,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun openArchive(summary: ArchiveSummary) {
         val repo = repo() ?: return
-        selected.clear()
+        clearSelection()
         val remembered = details[summary.releaseId]
         detail = remembered
         currentPath = ""
@@ -565,14 +624,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun enterFolder(path: String) {
-        selected.clear()
+        clearSelection()
         currentPath = path
     }
 
     /** Returns false when already at the archive root, so the caller can pop the back stack. */
     fun goUp(): Boolean {
-        if (selected.isNotEmpty()) {
-            selected.clear()
+        if (selectionMode) {
+            clearSelection()
             return true
         }
         if (currentPath.isEmpty()) return false

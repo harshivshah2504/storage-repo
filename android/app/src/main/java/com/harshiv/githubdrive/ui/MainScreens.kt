@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -291,7 +292,7 @@ fun BrowseScreen(
 ) {
     val detail = vm.detail
     val title = detail?.summary?.sourceName ?: "Opening..."
-    val selecting = vm.selected.isNotEmpty()
+    val selecting = vm.selectionMode
     var confirmDelete by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
@@ -301,7 +302,13 @@ fun BrowseScreen(
             TopAppBar(
                 title = {
                     if (selecting) {
-                        Text("${vm.selected.size} selected")
+                        Text(
+                            if (vm.selected.isEmpty()) {
+                                "Tap files to select"
+                            } else {
+                                "${vm.selected.size} selected"
+                            }
+                        )
                     } else {
                         Column {
                             Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -334,18 +341,19 @@ fun BrowseScreen(
                 },
                 actions = {
                     if (selecting) {
+                        val any = vm.selected.isNotEmpty()
                         if (vm.selected.size == 1) {
                             IconButton(onClick = { renaming = true }) {
                                 Icon(Icons.Filled.DriveFileRenameOutline, contentDescription = "Rename")
                             }
                         }
-                        IconButton(onClick = { moving = true }) {
+                        IconButton(onClick = { moving = true }, enabled = any) {
                             Icon(Icons.Filled.DriveFileMove, contentDescription = "Move selected")
                         }
-                        IconButton(onClick = { onSaveMany() }) {
+                        IconButton(onClick = { onSaveMany() }, enabled = any) {
                             Icon(Icons.Filled.Download, contentDescription = "Save selected")
                         }
-                        IconButton(onClick = { confirmDelete = true }) {
+                        IconButton(onClick = { confirmDelete = true }, enabled = any) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
                         }
                         IconButton(
@@ -354,6 +362,10 @@ fun BrowseScreen(
                             Icon(Icons.Filled.SelectAll, contentDescription = "Select all here")
                         }
                     } else {
+                        // A long press works too, but nobody can see a long press.
+                        IconButton(onClick = { vm.startSelecting() }) {
+                            Icon(Icons.Filled.Checklist, contentDescription = "Select files")
+                        }
                         val tiled = vm.browseView == BrowseView.TILE
                         IconButton(onClick = { vm.toggleBrowseView() }) {
                             Icon(
@@ -391,16 +403,17 @@ fun BrowseScreen(
                     } else {
                         // While anything is ticked, a tap ticks instead of opening - the usual
                         // gallery behaviour, and it stops a stray tap leaving the screen.
+                        // While picking, a tap ticks instead of opening - the usual gallery
+                        // behaviour, and it stops a stray tap walking out of the folder. Folders
+                        // can be ticked too: picking one picks everything inside it.
                         val open: (ArchiveEntry) -> Unit = { entry ->
                             when {
-                                selecting && !entry.isFolder -> vm.toggleSelected(entry)
+                                selecting -> vm.toggleSelected(entry)
                                 entry.isFolder -> vm.enterFolder(entry.relativePath)
                                 else -> onSave(entry)
                             }
                         }
-                        val hold: (ArchiveEntry) -> Unit = { entry ->
-                            if (!entry.isFolder) vm.toggleSelected(entry)
-                        }
+                        val hold: (ArchiveEntry) -> Unit = { entry -> vm.toggleSelected(entry) }
                         when (vm.browseView) {
                             BrowseView.LIST -> LazyColumn(Modifier.fillMaxSize()) {
                                 if (detail.encrypted) {
