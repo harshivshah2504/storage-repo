@@ -156,8 +156,10 @@ class Uploader(
 
         // ---- cover, best effort ----------------------------------------------------------
         if (!existingAssets.containsKey(Format.COVER_ASSET_NAME)) {
-            entries.firstOrNull { Format.classifyPath(it.relativePath) == "image" }?.let { imageItem ->
-                Cover.buildJpeg(context, imageItem.uri)?.let { jpeg ->
+            // First image or video, matching first_visual_entry in the spec - a video-only archive
+            // gets a cover too rather than falling back to a generic icon.
+            entries.firstOrNull { Format.isVisual(it.relativePath) }?.let { visual ->
+                Cover.buildJpegFor(context, visual.uri, visual.relativePath)?.let { jpeg ->
                     runCatching {
                         client.uploadAssetBytes(releaseId, Format.COVER_ASSET_NAME, jpeg, "image/jpeg")
                     }
@@ -293,11 +295,11 @@ class Uploader(
         item: UploadItem,
         existingAssets: Map<String, JSONObject>
     ) {
-        if (Format.classifyPath(item.relativePath) != "image") return
+        if (!Format.isVisual(item.relativePath)) return
         val name = Format.thumbAssetNameFor(order, item.relativePath)
         if (existingAssets.containsKey(name)) return
 
-        val jpeg = Cover.buildJpeg(context, item.uri) ?: return
+        val jpeg = Cover.buildJpegFor(context, item.uri, item.relativePath) ?: return
         runCatching {
             client.uploadAssetBytes(releaseId, name, jpeg, "image/jpeg")
         }
@@ -325,7 +327,7 @@ class Uploader(
         meta["storage_mode"] = Format.STORAGE_MODE_FILE_ASSETS
         meta["kinds"] = Format.classifyCounts(paths)
         meta["cover_asset_name"] =
-            if (paths.any { Format.classifyPath(it) == "image" }) Format.COVER_ASSET_NAME else null
+            if (paths.any { Format.isVisual(it) }) Format.COVER_ASSET_NAME else null
         if (virtualFolders.isNotEmpty()) {
             meta["virtual_folders"] = expandFolders(virtualFolders, paths)
         }

@@ -4,7 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.harshiv.githubdrive.core.Format
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
@@ -21,6 +23,9 @@ object Cover {
 
     const val SIZE = 480
     private const val QUALITY = 80
+
+    /** Half a second in, matching the spec's ffmpeg seek - far enough past a black first frame. */
+    private const val FRAME_MICROS = 500_000L
 
     fun buildJpeg(context: Context, uri: Uri): ByteArray? = try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -41,6 +46,38 @@ object Cover {
         // A cover is cosmetic; never fail an upload over it.
         null
     }
+
+    /**
+     * A frame from a video, as the same 480x480 JPEG.
+     *
+     * The spec's ffmpeg path takes a frame half a second in and crops it square; this is the
+     * Android equivalent, and the format explicitly does not ask the bytes to match - every reader
+     * just displays whatever `_cover.jpg` holds.
+     */
+    fun buildVideoJpeg(context: Context, uri: Uri): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val frame = retriever.getFrameAtTime(
+                FRAME_MICROS,
+                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            ) ?: retriever.frameAtTime
+            frame?.let { squareJpeg(it, it) }
+        } catch (e: Throwable) {
+            // Codecs this device cannot decode, DRM, a truncated file: no cover, never a crash.
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    /** Picks the right frame grabber for what the file actually is. */
+    fun buildJpegFor(context: Context, uri: Uri, relativePath: String): ByteArray? =
+        when (Format.classifyPath(relativePath)) {
+            "image" -> buildJpeg(context, uri)
+            "video" -> buildVideoJpeg(context, uri)
+            else -> null
+        }
 
     /**
      * The same 480x480 JPEG from bytes already in hand, for thumbnailing a stored image the app

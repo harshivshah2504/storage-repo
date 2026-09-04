@@ -263,10 +263,13 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
      */
     suspend fun thumbnail(entry: ArchiveEntry): ByteArray? = withContext(Dispatchers.IO) {
         if (entry.encrypted || entry.isFolder) return@withContext null
-        if (entry.kind != "image") return@withContext null
+        if (entry.kind != "image" && entry.kind != "video") return@withContext null
         if (entry.memberOf != null) return@withContext null
 
         val stored = entry.thumbAsset
+        // A video only ever shows a preview that was stored with it. Pulling a whole film down to
+        // grab one frame is not a trade worth making on a phone connection.
+        if (stored == null && entry.kind == "video") return@withContext null
         val cacheId = stored?.id ?: entry.parts.singleOrNull()?.assetId ?: return@withContext null
         val cached = File(cacheDir, "thumb-$cacheId.jpg")
         if (cached.exists() && cached.length() > 0L) {
