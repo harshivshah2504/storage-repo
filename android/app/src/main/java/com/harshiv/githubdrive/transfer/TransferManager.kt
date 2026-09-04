@@ -8,6 +8,7 @@ import com.harshiv.githubdrive.drive.DriveRepo
 import com.harshiv.githubdrive.drive.ArchiveEntry
 import com.harshiv.githubdrive.drive.UploadItem
 import com.harshiv.githubdrive.drive.Uploader
+import com.harshiv.githubdrive.github.GitHubException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -91,24 +92,41 @@ object TransferManager {
         val job = scope.launch {
             try {
                 if (uploadGate.isLocked) update(id) { it.copy(detail = "Waiting its turn") }
+                var skippedCount = 0
                 uploadGate.withLock {
-                    uploader.upload(sourceName, items, virtualFolders) { progress ->
-                        update(id) {
-                            it.copy(
-                                bytesDone = progress.bytesSent,
-                                bytesTotal = progress.totalBytes,
-                                itemsDone = progress.completedItems,
-                                itemsTotal = progress.totalItems,
-                                detail = progress.currentName.ifEmpty { it.detail }
-                            )
-                        }
-                    }
+                    uploader.upload(
+                        sourceName = sourceName,
+                        items = items,
+                        virtualFolders = virtualFolders,
+                        onProgress = { progress ->
+                            update(id) {
+                                it.copy(
+                                    bytesDone = progress.bytesSent,
+                                    bytesTotal = progress.totalBytes,
+                                    itemsDone = progress.completedItems,
+                                    itemsTotal = progress.totalItems,
+                                    detail = progress.currentName.ifEmpty { it.detail }
+                                )
+                            }
+                        },
+                        onSkipped = { _, _ -> skippedCount++ }
+                    )
                 }
-                update(id) { it.copy(state = TransferState.DONE, bytesDone = it.bytesTotal, detail = "Uploaded") }
+                update(id) {
+                    it.copy(
+                        state = TransferState.DONE,
+                        bytesDone = it.bytesTotal,
+                        detail = if (skippedCount == 0) {
+                            "Uploaded"
+                        } else {
+                            "Uploaded - $skippedCount file${if (skippedCount == 1) "" else "s"} skipped"
+                        }
+                    )
+                }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 update(id) { it.copy(state = TransferState.CANCELLED, detail = "Cancelled") }
             } catch (e: Exception) {
-                update(id) { it.copy(state = TransferState.FAILED, error = e.message ?: "Upload failed") }
+                update(id) { it.copy(state = TransferState.FAILED, error = readable(e)) }
             } finally {
                 jobs.remove(id)
                 onFinished()
@@ -117,6 +135,24 @@ object TransferManager {
         }
         jobs[id] = job
         return id
+    }
+
+    /**
+     * What to put in front of a person when a transfer fails.
+     *
+     * A raw GitHubException carries the API's JSON body, which is how a transfer row ended up
+     * reading `{"message":"Validation Failed","request_id":...}`. None of that helps anyone.
+     */
+    private fun readable(e: Exception): String = when {
+        e is java.io.IOException -> "No internet connection. Check your Wi-Fi and try again."
+        e is GitHubException && e.status == 401 -> "Sign-in expired. Sign out and back in."
+        e is GitHubException && e.status == 403 -> "GitHub refused this - the account may be over a limit."
+        e is GitHubException && e.status == 404 -> "That storage is gone. Check Settings."
+        e is GitHubException && e.status == 413 -> "That file is too large for GitHub to store."
+        e is GitHubException && e.status in 400..499 -> "GitHub would not accept this upload."
+        e is GitHubException && e.status == 0 -> "Could not reach GitHub. Try again."
+        e is GitHubException -> "GitHub had a problem (${e.status}). Try again shortly."
+        else -> e.message ?: "Upload failed"
     }
 
     fun startDownload(
@@ -155,7 +191,7 @@ object TransferManager {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 update(id) { it.copy(state = TransferState.CANCELLED, detail = "Cancelled") }
             } catch (e: Exception) {
-                update(id) { it.copy(state = TransferState.FAILED, error = e.message ?: "Download failed") }
+                update(id) { it.copy(state = TransferState.FAILED, error = readable(e)) }
             } finally {
                 jobs.remove(id)
                 onFinished()

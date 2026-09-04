@@ -22,6 +22,10 @@ object Picking {
         val items = ArrayList<UploadItem>()
         for (uri in uris) {
             val (name, size) = queryNameAndSize(context, uri)
+            // GitHub refuses an empty asset, and a camera folder is full of them - half-written
+            // captures, .pending placeholders, stubs left by other apps. One of those used to
+            // fail an entire folder upload.
+            if (size <= 0L) continue
             val relativePath = uniquePath(used, sanitizeName(name))
             items.add(UploadItem(uri, relativePath, size))
         }
@@ -45,7 +49,9 @@ object Picking {
             if (child.isDirectory) {
                 walk(child, path, out)
             } else if (child.isFile) {
-                out.add(UploadItem(child.uri, path, child.length()))
+                // Empty files are left out: GitHub rejects a zero-length asset outright.
+                val size = child.length()
+                if (size > 0L) out.add(UploadItem(child.uri, path, size))
             }
         }
     }

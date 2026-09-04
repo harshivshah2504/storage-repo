@@ -6,6 +6,7 @@ import com.harshiv.githubdrive.GdApp
 import com.harshiv.githubdrive.core.Format
 import com.harshiv.githubdrive.core.PyJson
 import com.harshiv.githubdrive.github.GitHubClient
+import com.harshiv.githubdrive.github.GitHubException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -43,7 +44,8 @@ class Uploader(
         items: List<UploadItem>,
         virtualFolders: List<String> = emptyList(),
         resumeTag: String? = null,
-        onProgress: (Progress) -> Unit = {}
+        onProgress: (Progress) -> Unit = {},
+        onSkipped: (relativePath: String, reason: String) -> Unit = { _, _ -> }
     ): ArchiveSummary = withContext(Dispatchers.IO) {
         if (items.isEmpty()) throw UploadException("No files were found to upload.")
 
@@ -97,98 +99,54 @@ class Uploader(
         val manifestItems = ArrayList<Map<String, Any?>>(entries.size)
         var bytesSent = 0L
 
+        val skipped = ArrayList<String>()
+
         entries.forEachIndexed { order, item ->
             coroutineContext.ensureActive()
             onProgress(Progress(order, entries.size, bytesSent, totalBytes, item.relativePath))
 
-            val plan = planChunks(order, item)
-            val allPresent = plan.all { existingAssets.containsKey(it.assetName) }
-
-            val parts: List<Map<String, Any?>>
-            val sha: String
-            val contentType: String
-
-            if (allPresent) {
-                // Whole-entry resume skip: never read, never hashed, matching the Python behaviour.
-                val first = existingAssets.getValue(plan[0].assetName)
-                contentType = first.optString("content_type", "application/octet-stream")
-                sha = ""
-                parts = plan.map { chunk ->
-                    val asset = existingAssets.getValue(chunk.assetName)
-                    partMap(chunk.index, chunk.assetName, asset.optLong("id"), asset.optLong("size", 0L))
-                }
-                bytesSent += item.size
-            } else {
-                contentType = Format.guessContentType(item.relativePath)
-                sha = if (item.size in 1..SHA_MAX_BYTES) sha256(item.uri) else ""
-                val built = ArrayList<Map<String, Any?>>(plan.size)
-                for (chunk in plan) {
-                    coroutineContext.ensureActive()
-                    val already = existingAssets[chunk.assetName]
-                    if (already != null) {
-                        built.add(
-                            partMap(
-                                chunk.index,
-                                chunk.assetName,
-                                already.optLong("id"),
-                                already.optLong("size", 0L)
-                            )
-                        )
-                        bytesSent += chunk.length
-                        continue
+            try {
+                uploadEntry(releaseId, order, item, entries.size, totalBytes, bytesSent, existingAssets, onProgress)
+                    .let { result ->
+                        bytesSent = result.bytesSent
+                        manifestItems.add(result.manifestItem)
                     }
-                    val baseBytes = bytesSent
-                    val asset = client.uploadAssetStream(
-                        releaseId = releaseId,
-                        assetName = chunk.assetName,
-                        contentType = contentType,
-                        contentLength = chunk.length,
-                        onProgress = { sentInChunk ->
-                            onProgress(
-                                Progress(
-                                    order,
-                                    entries.size,
-                                    baseBytes + sentInChunk,
-                                    totalBytes,
-                                    item.relativePath
-                                )
-                            )
-                        }
-                    ) { openAt(item.uri, chunk.offset) }
-                    built.add(
-                        partMap(
-                            chunk.index,
-                            chunk.assetName,
-                            asset.optLong("id"),
-                            asset.optLong("size", chunk.length)
-                        )
-                    )
-                    bytesSent = baseBytes + chunk.length
-                }
-                parts = built
+            } catch (e: GitHubException) {
+                // GitHub refused this particular file: too big for one asset, a name it will not
+                // take, something unreadable behind the URI. One bad file in two thousand must not
+                // throw the other 1,999 away, so it is left out and reported. A transport failure
+                // is a different thing entirely - that still stops the upload, because retrying is
+                // what makes it resumable.
+                if (e.status !in SKIPPABLE_STATUSES) throw e
+                skipped.add(item.relativePath)
+                onSkipped(item.relativePath, e.reason)
+                bytesSent += item.size
             }
+        }
 
-            uploadThumbnail(releaseId, order, item, existingAssets)
+        val uploadedPaths = manifestItems.mapNotNull { it["relative_path"] as? String }
 
-            manifestItems.add(
-                itemMap(
-                    order = order,
-                    assetName = plan[0].assetName,
-                    assetId = (parts[0]["asset_id"] as Number).toLong(),
-                    relativePath = item.relativePath,
-                    originalSize = item.size,
-                    sha256 = sha,
-                    contentType = contentType,
-                    parts = parts
+        // Files that were left out must not be left in the counts. The body is rewritten so the
+        // archive describes what it actually holds rather than what was hoped for.
+        if (skipped.isNotEmpty() && uploadedPaths.isNotEmpty()) {
+            val corrected = buildMeta(archiveId, createdAt, sourceName, sourceType, uploadedPaths, virtualFolders)
+            runCatching {
+                client.updateRelease(
+                    releaseId,
+                    Format.titleFor(sourceName, uploadedPaths.size),
+                    Format.encodeArchiveBody(corrected)
                 )
-            )
+            }
         }
 
         // ---- manifest last, always rewritten ---------------------------------------------
+
         existingAssets[Format.MANIFEST_ASSET_NAME]?.let { stale ->
             runCatching { client.deleteAsset(stale.optLong("id")) }
         }
-        val manifest = buildManifest(archiveId, createdAt, sourceName, sourceType, entries.size, manifestItems)
+        val manifest = buildManifest(
+            archiveId, createdAt, sourceName, sourceType, manifestItems.size, manifestItems
+        )
         client.uploadAssetBytes(
             releaseId = releaseId,
             assetName = Format.MANIFEST_ASSET_NAME,
@@ -221,6 +179,103 @@ class Uploader(
         (context.applicationContext as? GdApp)?.prefs?.addStoredBytes(summary.totalAssetBytes - alreadyStoredBytes)
 
         summary
+    }
+
+    private class EntryResult(val bytesSent: Long, val manifestItem: Map<String, Any?>)
+
+    /**
+     * Uploads one file's chunks and returns its manifest entry.
+     *
+     * Pulled out of the loop so that one file failing is an ordinary caught exception rather than
+     * something that has to unwind the whole archive.
+     */
+    private suspend fun uploadEntry(
+        releaseId: Long,
+        order: Int,
+        item: UploadItem,
+        totalItems: Int,
+        totalBytes: Long,
+        startBytes: Long,
+        existingAssets: Map<String, JSONObject>,
+        onProgress: (Progress) -> Unit
+    ): EntryResult {
+        var bytesSent = startBytes
+        val plan = planChunks(order, item)
+        val allPresent = plan.all { existingAssets.containsKey(it.assetName) }
+
+        val parts: List<Map<String, Any?>>
+        val sha: String
+        val contentType: String
+
+        if (allPresent) {
+            // Whole-entry resume skip: never read, never hashed, matching the Python behaviour.
+            val first = existingAssets.getValue(plan[0].assetName)
+            contentType = first.optString("content_type", "application/octet-stream")
+            sha = ""
+            parts = plan.map { chunk ->
+                val asset = existingAssets.getValue(chunk.assetName)
+                partMap(chunk.index, chunk.assetName, asset.optLong("id"), asset.optLong("size", 0L))
+            }
+            bytesSent += item.size
+        } else {
+            contentType = Format.guessContentType(item.relativePath)
+            sha = if (item.size in 1..SHA_MAX_BYTES) sha256(item.uri) else ""
+            val built = ArrayList<Map<String, Any?>>(plan.size)
+            for (chunk in plan) {
+                coroutineContext.ensureActive()
+                val already = existingAssets[chunk.assetName]
+                if (already != null) {
+                    built.add(
+                        partMap(
+                            chunk.index,
+                            chunk.assetName,
+                            already.optLong("id"),
+                            already.optLong("size", 0L)
+                        )
+                    )
+                    bytesSent += chunk.length
+                    continue
+                }
+                val baseBytes = bytesSent
+                val asset = client.uploadAssetStream(
+                    releaseId = releaseId,
+                    assetName = chunk.assetName,
+                    contentType = contentType,
+                    contentLength = chunk.length,
+                    onProgress = { sentInChunk ->
+                        onProgress(
+                            Progress(order, totalItems, baseBytes + sentInChunk, totalBytes, item.relativePath)
+                        )
+                    }
+                ) { openAt(item.uri, chunk.offset) }
+                built.add(
+                    partMap(
+                        chunk.index,
+                        chunk.assetName,
+                        asset.optLong("id"),
+                        asset.optLong("size", chunk.length)
+                    )
+                )
+                bytesSent = baseBytes + chunk.length
+            }
+            parts = built
+        }
+
+        uploadThumbnail(releaseId, order, item, existingAssets)
+
+        return EntryResult(
+            bytesSent = bytesSent,
+            manifestItem = itemMap(
+                order = order,
+                assetName = plan[0].assetName,
+                assetId = (parts[0]["asset_id"] as Number).toLong(),
+                relativePath = item.relativePath,
+                originalSize = item.size,
+                sha256 = sha,
+                contentType = contentType,
+                parts = parts
+            )
+        )
     }
 
     /**
@@ -419,5 +474,12 @@ class Uploader(
 
     companion object {
         private const val SHA_MAX_BYTES = 256L * 1024L * 1024L
+
+        /**
+         * GitHub refusing a specific file, rather than the connection failing. Anything else -
+         * a transport error, a 5xx, an expired token - has to stop the upload so that retrying
+         * can resume it.
+         */
+        private val SKIPPABLE_STATUSES = setOf(400, 413, 422)
     }
 }
