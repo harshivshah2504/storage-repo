@@ -24,6 +24,7 @@ import androidx.work.WorkerParameters
 import com.harshiv.githubdrive.GdApp
 import com.harshiv.githubdrive.MainActivity
 import com.harshiv.githubdrive.R
+import com.harshiv.githubdrive.drive.Picking
 import com.harshiv.githubdrive.drive.UploadItem
 import com.harshiv.githubdrive.drive.Uploader
 import com.harshiv.githubdrive.github.GitHubClient
@@ -274,11 +275,19 @@ object AutoUpload {
                         val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
                         while (cursor.moveToNext() && out.size < BATCH) {
                             val id = cursor.getLong(idColumn)
-                            val size = cursor.getLong(sizeColumn)
+                            val uri = ContentUris.withAppendedId(collection, id)
+                            // A reported zero is not proof of an empty file, so it is measured
+                            // before being written off - otherwise the watermark would step past
+                            // a real photo and never come back to it.
+                            val size = Picking.trueSize(
+                                applicationContext,
+                                uri,
+                                cursor.getLong(sizeColumn)
+                            )
                             if (size <= 0L) continue
                             out.add(
                                 Media(
-                                    uri = ContentUris.withAppendedId(collection, id),
+                                    uri = uri,
                                     name = cursor.getString(nameColumn) ?: "photo-$id",
                                     size = size,
                                     dateAdded = cursor.getLong(dateColumn),

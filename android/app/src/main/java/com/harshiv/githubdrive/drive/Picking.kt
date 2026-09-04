@@ -21,10 +21,8 @@ object Picking {
         val used = HashSet<String>()
         val items = ArrayList<UploadItem>()
         for (uri in uris) {
-            val (name, size) = queryNameAndSize(context, uri)
-            // GitHub refuses an empty asset, and a camera folder is full of them - half-written
-            // captures, .pending placeholders, stubs left by other apps. One of those used to
-            // fail an entire folder upload.
+            val (name, reported) = queryNameAndSize(context, uri)
+            val size = trueSize(context, uri, reported)
             if (size <= 0L) continue
             val relativePath = uniquePath(used, sanitizeName(name))
             items.add(UploadItem(uri, relativePath, size))
@@ -38,23 +36,34 @@ object Picking {
             ?: return Pair("archive", emptyList())
         val sourceName = root.name ?: "archive"
         val items = ArrayList<UploadItem>()
-        walk(root, "", items)
+        walk(context, root, "", items)
         return Pair(sourceName, Format.sortedByPath(items) { it.relativePath })
     }
 
-    private fun walk(dir: DocumentFile, prefix: String, out: MutableList<UploadItem>) {
+    private fun walk(context: Context, dir: DocumentFile, prefix: String, out: MutableList<UploadItem>) {
         for (child in dir.listFiles()) {
             val name = child.name ?: continue
             val path = if (prefix.isEmpty()) sanitizeName(name) else "$prefix/${sanitizeName(name)}"
             if (child.isDirectory) {
-                walk(child, path, out)
+                walk(context, child, path, out)
             } else if (child.isFile) {
-                // Empty files are left out: GitHub rejects a zero-length asset outright.
-                val size = child.length()
+                val size = trueSize(context, child.uri, child.length())
                 if (size > 0L) out.add(UploadItem(child.uri, path, size))
             }
         }
     }
+
+    /**
+     * The real byte count, checked by reading when the listing claims there is nothing there.
+     *
+     * GitHub rejects a zero-length asset outright, and a camera folder does hold genuine empties -
+     * half-written captures, .pending placeholders, stubs left by other apps - so they have to be
+     * left out. But a reported zero is not proof of an empty file: cloud-backed and some OEM
+     * providers answer 0 for a photo that is perfectly real. Reading it is the only way to know,
+     * and it only ever happens for the handful of files that claim to be empty.
+     */
+    fun trueSize(context: Context, uri: Uri, reported: Long): Long =
+        if (reported > 0L) reported else measureByReading(context, uri)
 
     /** Every empty folder in the picked tree, so the archive can remember them. */
     fun emptyFolders(context: Context, treeUri: Uri): List<String> {
