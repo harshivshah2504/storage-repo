@@ -24,6 +24,7 @@ object Picking {
             val (name, reported) = queryNameAndSize(context, uri)
             val size = trueSize(context, uri, reported)
             if (size <= 0L) continue
+            if (isAndroidArtefact(name)) continue
             val relativePath = uniquePath(used, sanitizeName(name))
             items.add(UploadItem(uri, relativePath, size))
         }
@@ -43,6 +44,7 @@ object Picking {
     private fun walk(context: Context, dir: DocumentFile, prefix: String, out: MutableList<UploadItem>) {
         for (child in dir.listFiles()) {
             val name = child.name ?: continue
+            if (isAndroidArtefact(name)) continue
             val path = if (prefix.isEmpty()) sanitizeName(name) else "$prefix/${sanitizeName(name)}"
             if (child.isDirectory) {
                 walk(context, child, path, out)
@@ -52,6 +54,19 @@ object Picking {
             }
         }
     }
+
+    /**
+     * Things Android keeps in a folder that are not the person's files.
+     *
+     * Deleting a photo does not erase it: MediaStore renames it to `.trashed-<expiry>-<name>` and
+     * keeps it for about a month. `.pending-` is a file still being written. Walking a camera
+     * folder picks up both, so a backup was quietly storing deleted photos - and a half-written
+     * one reports a length it cannot deliver, which is what GitHub rejected outright.
+     *
+     * `.thumbnails` is a gallery cache, regenerated on demand and worth nothing in a backup.
+     */
+    private fun isAndroidArtefact(name: String): Boolean =
+        name.startsWith(".trashed-") || name.startsWith(".pending-") || name == ".thumbnails"
 
     /**
      * The real byte count, checked by reading when the listing claims there is nothing there.
