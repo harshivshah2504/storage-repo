@@ -26,6 +26,9 @@ class GitHubException(
     val body: String = ""
 ) : RuntimeException("GitHub $status $reason: ${body.take(400)}")
 
+/** A file yielded fewer bytes than its recorded size promised. */
+class ShortUploadException(message: String) : java.io.IOException(message)
+
 /**
  * Thin GitHub REST client covering exactly the calls github-drive uses.
  *
@@ -78,6 +81,10 @@ class GitHubClient(
                 throw GitHubException(code, message, body)
             } catch (e: GitHubException) {
                 throw e
+            } catch (e: ShortUploadException) {
+                // Retrying reads the same wrong length again. Report it as a rejection of this
+                // one file so the caller can skip it and carry on with the rest.
+                throw GitHubException(422, "file changed while uploading", e.message.orEmpty())
             } catch (e: InterruptedException) {
                 throw e
             } catch (e: Exception) {
@@ -296,6 +303,15 @@ class GitHubClient(
                         sink.write(buffer, 0, read)
                         written += read
                         onProgress?.invoke(written)
+                    }
+                    // The size came from the file listing, which can be stale - a photo still
+                    // being written, a provider that lied, a file replaced mid-upload. Sending
+                    // fewer bytes than Content-Length promised makes GitHub reject the whole
+                    // request with a bare validation error, so say what actually happened.
+                    if (written < contentLength) {
+                        throw ShortUploadException(
+                            "$assetName changed while uploading: expected $contentLength bytes, read $written"
+                        )
                     }
                 }
             }
