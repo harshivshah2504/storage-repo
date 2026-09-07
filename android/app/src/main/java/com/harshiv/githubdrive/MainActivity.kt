@@ -144,6 +144,12 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         if (uri != null) vm.downloadSelected(uri)
     }
 
+    val saveArchivesIntoFolder = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) vm.downloadSelectedArchives(uri)
+    }
+
     // Anything shared in from another app queues as soon as we have a signed-in session.
     LaunchedEffect(vm.signedIn, pendingShareCount) {
         if (vm.signedIn && pendingShareCount > 0) {
@@ -168,6 +174,10 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         return
     }
 
+    BackHandler(enabled = vm.archiveSelectionMode && screen == Screen.ARCHIVES) {
+        vm.clearArchiveSelection()
+    }
+
     BackHandler(enabled = screen != Screen.ARCHIVES) {
         if (screen == Screen.BROWSE && vm.goUp()) return@BackHandler
         screen = Screen.ARCHIVES
@@ -183,7 +193,8 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
             onTransfers = { screen = Screen.TRANSFERS },
             onSettings = { screen = Screen.SETTINGS },
             onPickFiles = { pickFiles.launch(arrayOf("*/*")) },
-            onPickFolder = { pickFolder.launch(null) }
+            onPickFolder = { pickFolder.launch(null) },
+            onSaveMany = { saveArchivesIntoFolder.launch(null) }
         )
 
         Screen.BROWSE -> BrowseScreen(

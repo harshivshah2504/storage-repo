@@ -79,6 +79,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Files ticked inside the open archive, by path. */
     val selected = mutableStateListOf<String>()
 
+    /** Archives ticked on the grid, by release id. */
+    val selectedArchives = mutableStateListOf<Long>()
+
+    var archiveSelectionMode by mutableStateOf(false)
+        private set
+
     /**
      * Whether the browse screen is picking rather than opening.
      *
@@ -256,6 +262,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshArchives() {
         val repo = repo() ?: return
+        clearArchiveSelection()
         details.clear()
         storedBytes = prefs.storedBytes
         page = 1
@@ -345,6 +352,105 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startSelecting() {
         selectionMode = true
+    }
+
+    // ------------------------------------------------------------------ picking archives
+
+    fun startSelectingArchives() {
+        archiveSelectionMode = true
+    }
+
+    fun toggleArchiveSelected(summary: ArchiveSummary) {
+        archiveSelectionMode = true
+        if (!selectedArchives.remove(summary.releaseId)) selectedArchives.add(summary.releaseId)
+    }
+
+    fun clearArchiveSelection() {
+        selectedArchives.clear()
+        archiveSelectionMode = false
+    }
+
+    fun selectAllArchives() {
+        archiveSelectionMode = true
+        selectedArchives.clear()
+        selectedArchives.addAll(archives.map { it.releaseId })
+    }
+
+    private fun chosenArchives(): List<ArchiveSummary> {
+        val ids = selectedArchives.toSet()
+        return archives.filter { it.releaseId in ids }
+    }
+
+    /** Deletes every ticked archive. */
+    fun deleteSelectedArchives() {
+        val repo = repo() ?: return
+        val targets = chosenArchives()
+        clearArchiveSelection()
+        if (targets.isEmpty()) return
+
+        viewModelScope.launch {
+            val removed = HashSet<Long>()
+            var failed = 0
+            for (summary in targets) {
+                try {
+                    repo.deleteArchive(summary)
+                    covers.remove(summary.releaseId)
+                    details.remove(summary.releaseId)
+                    prefs.addStoredBytes(-summary.totalAssetBytes)
+                    removed.add(summary.releaseId)
+                } catch (e: Exception) {
+                    failed++
+                }
+            }
+            archives = archives.filterNot { it.releaseId in removed }
+            usageDirty()
+            banner = if (failed == 0) {
+                "Deleted ${removed.size}"
+            } else {
+                "Deleted ${removed.size}, $failed could not be removed"
+            }
+        }
+    }
+
+    /**
+     * Saves every file out of every ticked archive into one folder.
+     *
+     * Each archive has to be opened to learn what is inside, so this is a handful of requests
+     * before anything starts moving.
+     */
+    fun downloadSelectedArchives(treeUri: Uri) {
+        val repo = repo() ?: return
+        val context = getApplication<Application>()
+        val targets = chosenArchives()
+        clearArchiveSelection()
+        if (targets.isEmpty()) return
+
+        viewModelScope.launch {
+            val tree = withContext(Dispatchers.IO) { DocumentFile.fromTreeUri(context, treeUri) }
+            if (tree == null) {
+                banner = "Could not open that folder."
+                return@launch
+            }
+            var started = 0
+            for (summary in targets) {
+                val loaded = runCatching { repo.loadDetail(summary) }.getOrNull() ?: continue
+                for (entry in loaded.entries.filterNot { it.isFolder }) {
+                    val target = withContext(Dispatchers.IO) {
+                        tree.createFile(
+                            entry.contentType.ifEmpty { "application/octet-stream" },
+                            entry.name
+                        )
+                    } ?: continue
+                    TransferManager.startDownload(context, repo, entry, target.uri)
+                    started++
+                }
+            }
+            banner = if (started == 0) {
+                "Nothing to save."
+            } else {
+                "Saving $started file${if (started == 1) "" else "s"}"
+            }
+        }
     }
 
     fun toggleSelected(entry: ArchiveEntry) {

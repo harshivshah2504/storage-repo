@@ -104,10 +104,13 @@ fun ArchivesScreen(
     onTransfers: () -> Unit,
     onSettings: () -> Unit,
     onPickFiles: () -> Unit,
-    onPickFolder: () -> Unit
+    onPickFolder: () -> Unit,
+    onSaveMany: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ArchiveSummary?>(null) }
+    var confirmDeleteMany by remember { mutableStateOf(false) }
+    val selecting = vm.archiveSelectionMode
 
     LaunchedEffect(Unit) {
         if (vm.archives.isEmpty()) vm.refreshArchives()
@@ -116,22 +119,53 @@ fun ArchivesScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Your files") },
+                title = {
+                    Text(
+                        when {
+                            !selecting -> "Your files"
+                            vm.selectedArchives.isEmpty() -> "Tap to select"
+                            else -> "${vm.selectedArchives.size} selected"
+                        }
+                    )
+                },
+                navigationIcon = {
+                    if (selecting) {
+                        IconButton(onClick = { vm.clearArchiveSelection() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                        }
+                    }
+                },
                 actions = {
-                    IconButton(onClick = { vm.refreshArchives() }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                    }
-                    IconButton(onClick = onTransfers) {
-                        Icon(Icons.Filled.SwapVert, contentDescription = "Transfers")
-                    }
-                    IconButton(onClick = onSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    if (selecting) {
+                        val any = vm.selectedArchives.isNotEmpty()
+                        IconButton(onClick = onSaveMany, enabled = any) {
+                            Icon(Icons.Filled.Download, contentDescription = "Save selected")
+                        }
+                        IconButton(onClick = { confirmDeleteMany = true }, enabled = any) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+                        }
+                        IconButton(onClick = { vm.selectAllArchives() }) {
+                            Icon(Icons.Filled.SelectAll, contentDescription = "Select all")
+                        }
+                    } else {
+                        IconButton(onClick = { vm.startSelectingArchives() }) {
+                            Icon(Icons.Filled.Checklist, contentDescription = "Select")
+                        }
+                        IconButton(onClick = { vm.refreshArchives() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        }
+                        IconButton(onClick = onTransfers) {
+                            Icon(Icons.Filled.SwapVert, contentDescription = "Transfers")
+                        }
+                        IconButton(onClick = onSettings) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
                     }
                 }
             )
         },
         floatingActionButton = {
-            Box {
+            if (!selecting) Box {
                 ExtendedFloatingActionButton(
                     onClick = { menuOpen = true },
                     icon = { Icon(Icons.Filled.Add, contentDescription = null) },
@@ -182,8 +216,13 @@ fun ArchivesScreen(
                         ArchiveCard(
                             archive = archive,
                             cover = vm.covers[archive.releaseId],
+                            selected = archive.releaseId in vm.selectedArchives,
+                            selecting = selecting,
                             onLoadCover = { vm.loadCover(archive) },
-                            onOpen = { onOpen(archive) },
+                            onOpen = {
+                                if (selecting) vm.toggleArchiveSelected(archive) else onOpen(archive)
+                            },
+                            onLongClick = { vm.toggleArchiveSelected(archive) },
                             onDelete = { pendingDelete = archive }
                         )
                     }
@@ -198,6 +237,24 @@ fun ArchivesScreen(
                 }
             }
         }
+    }
+
+    if (confirmDeleteMany) {
+        val count = vm.selectedArchives.size
+        AlertDialog(
+            onDismissRequest = { confirmDeleteMany = false },
+            title = { Text("Delete $count item${if (count == 1) "" else "s"}?") },
+            text = { Text("They will be removed from your storage. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteMany = false
+                    vm.deleteSelectedArchives()
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteMany = false }) { Text("Cancel") }
+            }
+        )
     }
 
     pendingDelete?.let { target ->
@@ -224,8 +281,11 @@ fun ArchivesScreen(
 private fun ArchiveCard(
     archive: ArchiveSummary,
     cover: ByteArray?,
+    selected: Boolean,
+    selecting: Boolean,
     onLoadCover: () -> Unit,
     onOpen: () -> Unit,
+    onLongClick: () -> Unit,
     onDelete: () -> Unit
 ) {
     LaunchedEffect(archive.releaseId) { onLoadCover() }
@@ -234,14 +294,37 @@ private fun ArchiveCard(
     val dominantKind = archive.kinds.maxByOrNull { it.value }?.takeIf { it.value > 0 }?.key ?: "other"
 
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { onOpen() },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        CoverThumb(
-            bytes = cover,
-            fallbackKind = if (archive.sourceType == "directory") "folder" else dominantKind,
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onOpen, onLongClick = onLongClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.surfaceVariant
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
         )
+    ) {
+        Box {
+            CoverThumb(
+                bytes = cover,
+                fallbackKind = if (archive.sourceType == "directory") "folder" else dominantKind,
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
+            )
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                )
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Selected",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(24.dp)
+                )
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -265,16 +348,18 @@ private fun ArchiveCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Box {
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "More")
-                }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Delete") },
-                        leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                        onClick = { menuOpen = false; onDelete() }
-                    )
+            if (!selecting) {
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+                            onClick = { menuOpen = false; onDelete() }
+                        )
+                    }
                 }
             }
         }
