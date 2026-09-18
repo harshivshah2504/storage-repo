@@ -8,6 +8,19 @@ val clientId: String = (project.findProperty("githubOauthClientId") as String?)
     ?.takeIf { it.isNotBlank() }
     ?: "REPLACE_WITH_YOUR_CLIENT_ID"
 
+/**
+ * Which commit this APK came from, shown in Settings.
+ *
+ * Without it there is no way to tell a build from six commits ago apart from the current one, and
+ * "it still does not work" becomes impossible to answer.
+ */
+val buildStamp: String = (project.findProperty("buildStamp") as String?)
+    ?.takeIf { it.isNotBlank() }
+    ?: providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.map { it.trim() }.orNull
+    ?: "local"
+
 android {
     namespace = "com.harshiv.githubdrive"
     compileSdk = 35
@@ -19,6 +32,7 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "GITHUB_OAUTH_CLIENT_ID", "\"$clientId\"")
+        buildConfigField("String", "BUILD_STAMP", "\"$buildStamp\"")
     }
 
     signingConfigs {

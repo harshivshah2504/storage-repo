@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInNew
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.PieChart
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material3.AlertDialog
@@ -88,6 +90,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.harshiv.githubdrive.BuildConfig
 import com.harshiv.githubdrive.drive.ArchiveEntry
 import com.harshiv.githubdrive.drive.ArchiveSummary
 import com.harshiv.githubdrive.transfer.AutoUpload
@@ -887,7 +890,9 @@ fun SettingsScreen(
     login: String?,
     repoName: String,
     storedBytes: Long,
+    cacheBytes: Long,
     onRefreshStorageUsed: () -> Unit,
+    onClearCache: () -> Unit,
     autoUpload: Boolean,
     autoUploadWifiOnly: Boolean,
     onAutoUpload: (Boolean) -> Unit,
@@ -943,9 +948,27 @@ fun SettingsScreen(
                 modifier = Modifier.clickable { onOpenRepo() }
             )
             ListItem(
-                headlineContent = { Text("Space used") },
-                supportingContent = { Text(formatBytes(storedBytes)) },
+                headlineContent = { Text("Stored in your account") },
+                supportingContent = { Text("${formatBytes(storedBytes)} of files kept in your storage") },
                 leadingContent = { Icon(Icons.Filled.PieChart, contentDescription = null) }
+            )
+            ListItem(
+                headlineContent = { Text("Cache on this phone") },
+                supportingContent = {
+                    Text(
+                        if (cacheBytes <= 0L) {
+                            "Nothing cached right now"
+                        } else {
+                            "${formatBytes(cacheBytes)} of previews. Clearing frees space; nothing stored is lost."
+                        }
+                    )
+                },
+                leadingContent = { Icon(Icons.Filled.Storage, contentDescription = null) },
+                trailingContent = {
+                    if (cacheBytes > 0L) {
+                        TextButton(onClick = onClearCache) { Text("Clear") }
+                    }
+                }
             )
             HorizontalDivider()
             ListItem(
@@ -997,6 +1020,14 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(16.dp)
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("Version") },
+                supportingContent = {
+                    Text("${BuildConfig.VERSION_NAME} (${BuildConfig.BUILD_STAMP})")
+                },
+                leadingContent = { Icon(Icons.Filled.Info, contentDescription = null) }
             )
             Spacer(Modifier.weight(1f))
             Text(

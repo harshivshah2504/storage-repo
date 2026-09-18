@@ -71,6 +71,30 @@ object Cover {
         }
     }
 
+    /**
+     * A frame from a video that is still on the server.
+     *
+     * Android's frame grabber speaks HTTP and range-reads, so it fetches the few megabytes around
+     * the frame it needs rather than the whole film. Not every container allows that - an MP4 with
+     * its index at the end has to be read further - so this is best effort and falls back to an
+     * icon.
+     */
+    fun buildVideoJpegFromUrl(url: String): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(url, emptyMap<String, String>())
+            val frame = retriever.getFrameAtTime(
+                FRAME_MICROS,
+                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            ) ?: retriever.frameAtTime
+            frame?.let { squareJpeg(it, it) }
+        } catch (e: Throwable) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
     /** Picks the right frame grabber for what the file actually is. */
     fun buildJpegFor(context: Context, uri: Uri, relativePath: String): ByteArray? =
         when (Format.classifyPath(relativePath)) {

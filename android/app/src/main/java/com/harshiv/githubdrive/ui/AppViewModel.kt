@@ -107,6 +107,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var storedBytes by mutableStateOf(prefs.storedBytes)
         private set
 
+    /** Previews and staged bundles this app is holding on the phone itself. */
+    var cacheBytes by mutableStateOf(0L)
+        private set
+
     /** Thumbnail bytes keyed by asset id; null means "looked and there isn't one". */
     val thumbs = mutableStateMapOf<Long, ByteArray?>()
 
@@ -659,6 +663,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         storedBytes = prefs.storedBytes
     }
 
+    /** Throws away the previews and staged files kept on the phone. Nothing stored is touched. */
+    fun clearCache() {
+        val repo = repo() ?: return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                repo.clearThumbnailCache()
+                repo.clearBundleCache()
+            }
+            thumbs.clear()
+            covers.clear()
+            cacheBytes = withContext(Dispatchers.IO) { repo.cacheBytes() }
+            banner = "Cache cleared"
+        }
+    }
+
     fun toggleBrowseView() {
         browseView = if (browseView == BrowseView.LIST) BrowseView.TILE else BrowseView.LIST
     }
@@ -686,6 +705,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refreshStorageUsed(force: Boolean = false) {
         storedBytes = prefs.storedBytes
+        viewModelScope.launch {
+            cacheBytes = withContext(Dispatchers.IO) { repo()?.cacheBytes() ?: 0L }
+        }
 
         // The counter is already right for anything this phone did. The walk only exists to catch
         // what it cannot see - an upload from the web app or another phone - so checking once a

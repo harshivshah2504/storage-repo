@@ -67,7 +67,8 @@ jobs:
         working-directory: android
         run: |
           gradle --no-daemon assembleRelease \
-            -PgithubOauthClientId="${{ vars.GH_OAUTH_CLIENT_ID }}"
+            -PgithubOauthClientId="${{ vars.GH_OAUTH_CLIENT_ID }}" \
+            -PbuildStamp="$(echo "${{ github.sha }}" | cut -c1-7)"
 
       - name: Rename APK
         working-directory: android

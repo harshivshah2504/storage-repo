@@ -268,9 +268,6 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         if (entry.memberOf != null) return@withContext null
 
         val stored = entry.thumbAsset
-        // A video only ever shows a preview that was stored with it. Pulling a whole film down to
-        // grab one frame is not a trade worth making on a phone connection.
-        if (stored == null && entry.kind == "video") return@withContext null
         val cacheId = stored?.id ?: entry.parts.singleOrNull()?.assetId ?: return@withContext null
         val cached = File(cacheDir, "thumb-$cacheId.jpg")
         if (cached.exists() && cached.length() > 0L) {
@@ -285,8 +282,19 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
             return@withContext bytes
         }
 
-        // Older archives have no preview, so the original has to come down and be shrunk once.
         val part = entry.parts.singleOrNull() ?: return@withContext null
+
+        // A video uploaded before previews existed. Rather than give up and show an icon forever,
+        // ask GitHub for the signed URL and let the frame grabber range-read it - a few megabytes
+        // instead of the whole film. Best effort: some containers keep their index at the end.
+        if (entry.kind == "video") {
+            val url = client.assetDownloadUrl(part.assetId) ?: return@withContext null
+            val frame = Cover.buildVideoJpegFromUrl(url) ?: return@withContext null
+            runCatching { cached.writeBytes(frame) }
+            return@withContext frame
+        }
+
+        // Older archives have no preview, so the original has to come down and be shrunk once.
         if (part.size > THUMB_SOURCE_MAX_BYTES) return@withContext null
         val source = runCatching { client.downloadAssetBytes(part.assetId) }.getOrNull()
             ?: return@withContext null
@@ -294,6 +302,12 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
         runCatching { cached.writeBytes(thumb) }
         thumb
     }
+
+    /** What the app is holding on this phone: previews and staged bundles. */
+    fun cacheBytes(): Long =
+        cacheDir.listFiles().orEmpty()
+            .filter { it.name.startsWith("thumb-") || it.name.startsWith("bundle-") }
+            .sumOf { it.length() }
 
     fun clearThumbnailCache() {
         cacheDir.listFiles()?.forEach { file ->

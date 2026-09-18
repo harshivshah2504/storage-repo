@@ -49,6 +49,12 @@ class GitHubClient(
         .retryOnConnectionFailure(true)
         .build()
 
+    /** Same client, but stops at the redirect so the signed URL can be read out of it. */
+    private val noRedirects: OkHttpClient = http.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
     private fun baseHeaders(): Headers = Headers.Builder()
         .add("Authorization", "Bearer $token")
         .add("Accept", "application/vnd.github+json")
@@ -380,6 +386,27 @@ class GitHubClient(
         .header("Accept", "application/octet-stream")
         .get()
         .build()
+
+    /**
+     * The signed URL GitHub redirects an asset download to.
+     *
+     * Handed to Android's frame grabber so it can range-read a video rather than pull the whole
+     * file down. The signed URL carries its own authorisation, so the token never leaves here -
+     * which is also why the redirect is read rather than followed.
+     */
+    suspend fun assetDownloadUrl(assetId: Long): String? = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("$repoPath/releases/assets/$assetId")
+            .headers(baseHeaders())
+            .header("Accept", "application/octet-stream")
+            .get()
+            .build()
+        runCatching {
+            noRedirects.newCall(request).execute().use { response ->
+                if (response.isRedirect) response.header("Location") else null
+            }
+        }.getOrNull()
+    }
 
     suspend fun downloadAssetBytes(assetId: Long): ByteArray = withContext(Dispatchers.IO) {
         execute(assetRequest(assetId)).use { it.body!!.bytes() }
