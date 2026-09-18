@@ -35,6 +35,21 @@ import kotlinx.coroutines.withContext
 /** How the files inside an archive are laid out. */
 enum class BrowseView { LIST, TILE }
 
+/** How many tiles sit across the grid. */
+enum class TileSize(val columns: Int, val label: String) {
+    LARGE(2, "Large"),
+    MEDIUM(3, "Medium"),
+    SMALL(4, "Small")
+}
+
+/** Ordering for the grid. Applies to what has been loaded, not to the whole account. */
+enum class ArchiveSort(val label: String) {
+    NEWEST("Newest first"),
+    OLDEST("Oldest first"),
+    NAME("Name A-Z"),
+    LARGEST("Largest first")
+}
+
 sealed interface SignInPhase {
     data object Idle : SignInPhase
     data class Preparing(val message: String) : SignInPhase
@@ -123,6 +138,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     var browseView by mutableStateOf(BrowseView.LIST)
         private set
+
+    var tileSize by mutableStateOf(prefs.tileSize())
+        private set
+
+    var archiveSort by mutableStateOf(prefs.archiveSort())
+        private set
+
+    /**
+     * The grid in the order it should be shown.
+     *
+     * Sorting happens over what has been loaded rather than at GitHub, which only ever returns
+     * releases newest-first. With the grid loading as it scrolls, that converges on the whole
+     * account; until then "largest first" means largest of what has arrived.
+     */
+    val sortedArchives: List<ArchiveSummary>
+        get() = when (archiveSort) {
+            ArchiveSort.NEWEST -> archives.sortedByDescending { it.createdAt }
+            ArchiveSort.OLDEST -> archives.sortedBy { it.createdAt }
+            ArchiveSort.NAME -> archives.sortedBy { it.sourceName.lowercase() }
+            ArchiveSort.LARGEST -> archives.sortedByDescending { it.totalAssetBytes }
+        }
 
     var autoUpload by mutableStateOf(prefs.autoUpload)
         private set
@@ -700,6 +736,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             cacheBytes = withContext(Dispatchers.IO) { repo.cacheBytes() }
             banner = "Cache cleared"
         }
+    }
+
+    fun setTileSize(size: TileSize) {
+        tileSize = size
+        prefs.setTileSize(size.name)
+    }
+
+    fun setArchiveSort(sort: ArchiveSort) {
+        archiveSort = sort
+        prefs.setArchiveSort(sort.name)
     }
 
     fun toggleBrowseView() {

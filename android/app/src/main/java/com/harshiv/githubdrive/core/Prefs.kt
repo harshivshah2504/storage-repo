@@ -48,6 +48,26 @@ class Prefs(context: Context) {
             ?: UNSET_REPO
         set(value) = prefs.edit().putString(KEY_REPO_NAME, value).apply()
 
+    // ------------------------------------------------------------------ grid preferences
+
+    fun tileSize(): com.harshiv.githubdrive.ui.TileSize =
+        runCatching {
+            com.harshiv.githubdrive.ui.TileSize.valueOf(
+                prefs.getString(KEY_TILE_SIZE, null) ?: "MEDIUM"
+            )
+        }.getOrDefault(com.harshiv.githubdrive.ui.TileSize.MEDIUM)
+
+    fun setTileSize(name: String) = prefs.edit().putString(KEY_TILE_SIZE, name).apply()
+
+    fun archiveSort(): com.harshiv.githubdrive.ui.ArchiveSort =
+        runCatching {
+            com.harshiv.githubdrive.ui.ArchiveSort.valueOf(
+                prefs.getString(KEY_ARCHIVE_SORT, null) ?: "NEWEST"
+            )
+        }.getOrDefault(com.harshiv.githubdrive.ui.ArchiveSort.NEWEST)
+
+    fun setArchiveSort(name: String) = prefs.edit().putString(KEY_ARCHIVE_SORT, name).apply()
+
     /** False until a sign-in has settled which storage this install uses. */
     val hasRepoName: Boolean get() = !prefs.getString(KEY_REPO_NAME, null).isNullOrEmpty()
 
@@ -163,6 +183,8 @@ class Prefs(context: Context) {
         private const val KEY_LOGIN = "login"
         private const val KEY_REPO_OWNER = "repo_owner"
         private const val KEY_REPO_NAME = "repo_name"
+        private const val KEY_TILE_SIZE = "tile_size"
+        private const val KEY_ARCHIVE_SORT = "archive_sort"
         private const val KEY_STORED_BYTES = "stored_bytes"
         private const val KEY_STORAGE_CHECKED_AT = "storage_checked_at"
         private const val KEY_AUTO_UPLOAD = "auto_upload"

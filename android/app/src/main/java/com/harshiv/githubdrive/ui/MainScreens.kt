@@ -29,12 +29,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
@@ -57,6 +59,7 @@ import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -84,6 +87,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
@@ -114,7 +118,18 @@ fun ArchivesScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<ArchiveSummary?>(null) }
     var confirmDeleteMany by remember { mutableStateOf(false) }
+    var viewMenuOpen by remember { mutableStateOf(false) }
     val selecting = vm.archiveSelectionMode
+    val gridState = rememberLazyGridState()
+
+    // Loads the next page as the end comes into view, rather than making anyone find a button.
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        }.collect { last ->
+            if (last >= vm.archives.size - 6) vm.loadMoreArchives()
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (vm.archives.isEmpty()) vm.refreshArchives()
@@ -154,6 +169,51 @@ fun ArchivesScreen(
                     } else {
                         IconButton(onClick = { vm.startSelectingArchives() }) {
                             Icon(Icons.Filled.Checklist, contentDescription = "Select")
+                        }
+                        Box {
+                            IconButton(onClick = { viewMenuOpen = true }) {
+                                Icon(Icons.Filled.Tune, contentDescription = "Sort and size")
+                            }
+                            DropdownMenu(
+                                expanded = viewMenuOpen,
+                                onDismissRequest = { viewMenuOpen = false }
+                            ) {
+                                Text(
+                                    "Sort by",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
+                                )
+                                ArchiveSort.entries.forEach { sort ->
+                                    DropdownMenuItem(
+                                        text = { Text(sort.label) },
+                                        leadingIcon = {
+                                            if (vm.archiveSort == sort) {
+                                                Icon(Icons.Filled.Check, contentDescription = null)
+                                            }
+                                        },
+                                        onClick = { viewMenuOpen = false; vm.setArchiveSort(sort) }
+                                    )
+                                }
+                                HorizontalDivider()
+                                Text(
+                                    "Tile size",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
+                                )
+                                TileSize.entries.forEach { size ->
+                                    DropdownMenuItem(
+                                        text = { Text(size.label) },
+                                        leadingIcon = {
+                                            if (vm.tileSize == size) {
+                                                Icon(Icons.Filled.Check, contentDescription = null)
+                                            }
+                                        },
+                                        onClick = { viewMenuOpen = false; vm.setTileSize(size) }
+                                    )
+                                }
+                            }
                         }
                         IconButton(onClick = { vm.refreshArchives() }) {
                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
@@ -209,14 +269,16 @@ fun ArchivesScreen(
                     subtitle = "Tap Upload to put your first files into your storage."
                 )
             } else {
+                val gap = if (vm.tileSize == TileSize.SMALL) 6.dp else 12.dp
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    contentPadding = PaddingValues(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    columns = GridCells.Fixed(vm.tileSize.columns),
+                    state = gridState,
+                    contentPadding = PaddingValues(gap),
+                    horizontalArrangement = Arrangement.spacedBy(gap),
+                    verticalArrangement = Arrangement.spacedBy(gap),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(vm.archives, key = { it.releaseId }) { archive ->
+                    items(vm.sortedArchives, key = { it.releaseId }) { archive ->
                         ArchiveCard(
                             archive = archive,
                             cover = vm.covers[archive.releaseId],
@@ -231,11 +293,16 @@ fun ArchivesScreen(
                         )
                     }
                     if (vm.hasMore) {
-                        item {
-                            OutlinedButton(
-                                onClick = { vm.loadMoreArchives() },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("Load more") }
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Box(
+                                Modifier.fillMaxWidth().padding(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            }
                         }
                     }
                 }
