@@ -738,12 +738,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setTileSize(size: TileSize) {
+    fun chooseTileSize(size: TileSize) {
         tileSize = size
         prefs.setTileSize(size.name)
     }
 
-    fun setArchiveSort(sort: ArchiveSort) {
+    fun chooseArchiveSort(sort: ArchiveSort) {
         archiveSort = sort
         prefs.setArchiveSort(sort.name)
     }

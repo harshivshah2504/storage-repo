@@ -192,7 +192,7 @@ fun ArchivesScreen(
                                                 Icon(Icons.Filled.Check, contentDescription = null)
                                             }
                                         },
-                                        onClick = { viewMenuOpen = false; vm.setArchiveSort(sort) }
+                                        onClick = { viewMenuOpen = false; vm.chooseArchiveSort(sort) }
                                     )
                                 }
                                 HorizontalDivider()
@@ -210,7 +210,7 @@ fun ArchivesScreen(
                                                 Icon(Icons.Filled.Check, contentDescription = null)
                                             }
                                         },
-                                        onClick = { viewMenuOpen = false; vm.setTileSize(size) }
+                                        onClick = { viewMenuOpen = false; vm.chooseTileSize(size) }
                                     )
                                 }
                             }
