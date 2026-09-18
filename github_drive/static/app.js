@@ -565,26 +565,15 @@ function mergeArchives(existing, incoming) {
 }
 
 function syncArchivesPagination() {
-  const wrapper = $("archivesPagination");
-  const button = $("loadMoreArchivesButton");
-  const note = $("archivesPaginationNote");
-  if (!wrapper || !button || !note) return;
+  const sentinel = $("archivesSentinel");
+  const note = $("archivesSentinelNote");
+  if (!sentinel || !note) return;
 
+  // The sentinel has to stay in the document while there is more to fetch: it is what the
+  // observer watches, and hiding it would stop the page ever asking for the next batch.
   const hasLoadedAny = state.archives.length > 0;
-  const show = hasLoadedAny && (state.archiveHasMore || state.archiveLoading);
-  wrapper.style.display = show ? "" : "none";
-  button.disabled = state.archiveLoading || !state.archiveHasMore;
-  button.textContent = state.archiveLoading ? "Loading..." : "Load more";
-
-  if (state.archiveHasMore) {
-    note.textContent = state.searchTerm.trim()
-      ? "Search and filters apply to the loaded archives. Load more to include older results."
-      : "Showing recent archives first. Load more to fetch older releases.";
-  } else if (state.archiveLoading) {
-    note.textContent = "Loading more archives…";
-  } else {
-    note.textContent = "";
-  }
+  sentinel.style.display = hasLoadedAny && state.archiveHasMore ? "" : "none";
+  note.textContent = state.archiveLoading ? "Loading more…" : "Scroll for more";
 }
 
 async function deleteArchiveRecord(archive) {
@@ -1923,10 +1912,71 @@ function setupViewToggle() {
   });
 }
 
+/**
+ * Fetches the next page when the end of the grid comes into view.
+ *
+ * The button it replaces was not only tedious - it made the collection look smaller than it is,
+ * because anything past the first page simply was not there until someone thought to press it.
+ * rootMargin starts the fetch before the sentinel is actually on screen, so scrolling stays
+ * continuous rather than stopping at every page boundary.
+ */
 function setupArchivesPagination() {
-  $("loadMoreArchivesButton").addEventListener("click", async () => {
-    await loadMoreArchives();
+  const sentinel = $("archivesSentinel");
+  if (!sentinel) return;
+
+  if (!("IntersectionObserver" in window)) {
+    // Very old browsers: fall back to watching the scroll position.
+    window.addEventListener("scroll", () => {
+      const nearBottom =
+        window.innerHeight + window.scrollY >= document.body.offsetHeight - 600;
+      if (nearBottom) loadMoreArchives();
+    }, { passive: true });
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadMoreArchives();
+    },
+    { rootMargin: "600px 0px" }
+  );
+  observer.observe(sentinel);
+}
+
+const TILE_SIZES = ["large", "medium", "small"];
+
+function applyTileSize(size) {
+  const chosen = TILE_SIZES.includes(size) ? size : "medium";
+  const grid = $("archivesGrid");
+  if (grid) {
+    TILE_SIZES.forEach((name) => grid.classList.toggle(`tiles-${name}`, name === chosen));
+  }
+  const toggle = $("tileSizeToggle");
+  if (toggle) {
+    toggle.querySelectorAll("button").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tile === chosen);
+    });
+  }
+  try {
+    localStorage.setItem("memvault.tileSize", chosen);
+  } catch (error) {
+    // Private browsing refuses localStorage; the choice just will not stick.
+  }
+}
+
+function setupTileSize() {
+  const toggle = $("tileSizeToggle");
+  if (!toggle) return;
+  toggle.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => applyTileSize(btn.dataset.tile));
   });
+  let saved = "medium";
+  try {
+    saved = localStorage.getItem("memvault.tileSize") || "medium";
+  } catch (error) {
+    saved = "medium";
+  }
+  applyTileSize(saved);
 }
 
 function applyViewMode(mode) {
@@ -2161,6 +2211,7 @@ async function init() {
   setupRefresh();
   setupViewToggle();
   setupArchivesPagination();
+  setupTileSize();
   setupDragAndDrop();
   setupContextMenu();
   setupPreviewBackdrop();

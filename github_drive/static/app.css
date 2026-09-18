@@ -505,6 +505,55 @@ input, select {
   gap: 16px;
 }
 
+/* Tile size, matching the three the phone offers. Smaller tiles get a smaller gap so the wall
+   reads as a wall rather than a scatter. */
+.archive-grid.tiles-large { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
+.archive-grid.tiles-medium { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.archive-grid.tiles-small { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+
+.tile-size-toggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+}
+
+.tile-size-toggle button {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  background: transparent;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.tile-size-toggle button.active {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+}
+
+/* The sentinel the scroller watches; it replaces the Load more button entirely. */
+.archives-sentinel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.archives-sentinel .spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: archives-spin 700ms linear infinite;
+}
+
+@keyframes archives-spin { to { transform: rotate(360deg); } }
+
 .archives-pagination {
   display: flex;
   align-items: center;

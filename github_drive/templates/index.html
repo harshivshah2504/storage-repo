@@ -136,6 +136,11 @@
             <p class="page-subtitle" id="pageSubtitle"></p>
           </div>
           <div class="page-toolbar">
+            <div class="tile-size-toggle" id="tileSizeToggle">
+              <button type="button" data-tile="large">Large</button>
+              <button type="button" data-tile="medium" class="active">Medium</button>
+              <button type="button" data-tile="small">Small</button>
+            </div>
             <div class="view-toggle" id="viewToggle">
               <button type="button" data-view="grid" class="active" title="Grid view" aria-label="Grid view">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h7v7H4V4zm9 0h7v7h-7V4zM4 13h7v7H4v-7zm9 0h7v7h-7v-7z"/></svg>
@@ -195,9 +200,9 @@
             </div>
             <div id="archivesListBody"></div>
           </div>
-          <div class="archives-pagination" id="archivesPagination" style="display:none">
-            <div class="archives-pagination-note" id="archivesPaginationNote"></div>
-            <button type="button" class="btn btn-secondary" id="loadMoreArchivesButton">Load more</button>
+          <div class="archives-sentinel" id="archivesSentinel" style="display:none">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="archivesSentinelNote">Loading more…</span>
           </div>
         </div>
 
