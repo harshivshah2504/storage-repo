@@ -517,6 +517,102 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
     }
 
     /**
+     * Copies files into another folder of the same archive.
+     *
+     * Free, and deliberately so. A copy is a second manifest entry pointing at the same asset, so
+     * duplicating a two-gigabyte video costs one manifest rewrite rather than four gigabytes of
+     * transfer. That is only safe because deletion counts references before removing an asset -
+     * see [deleteEntries]. The small preview is genuinely duplicated, since its name is derived
+     * from the path it belongs to, but that is forty kilobytes.
+     */
+    suspend fun copyEntries(
+        detail: ArchiveDetail,
+        copying: List<ArchiveEntry>,
+        targetFolder: String
+    ) = withContext(Dispatchers.IO) {
+        if (detail.encrypted) throw EncryptedArchiveException()
+        if (detail.storageMode == Format.STORAGE_MODE_BUNDLE_ASSETS) {
+            throw IllegalStateException("Files inside a bundled archive cannot be copied.")
+        }
+
+        val sources = copying.filterNot { it.isFolder }
+        if (sources.isEmpty()) return@withContext
+
+        val existing = detail.entries.filterNot { it.isFolder }
+        val taken = existing.map { it.relativePath }.toMutableSet()
+        val target = targetFolder.trim().trim('/')
+        var nextOrder = (existing.maxOfOrNull { it.order } ?: -1) + 1
+
+        val additions = ArrayList<ArchiveEntry>(sources.size)
+        for (source in sources) {
+            val name = uniqueName(taken, target, source.relativePath.substringAfterLast('/'))
+            val path = if (target.isEmpty()) name else "$target/$name"
+            taken.add(path)
+
+            val order = nextOrder++
+            // The preview's name encodes the path, so the copy needs one of its own.
+            val thumb = source.thumbAsset?.let { original ->
+                runCatching {
+                    val bytes = client.downloadAssetBytes(original.id)
+                    val uploaded = client.uploadAssetBytes(
+                        releaseId = detail.summary.releaseId,
+                        assetName = Format.thumbAssetNameFor(order, path),
+                        payload = bytes,
+                        contentType = "image/jpeg"
+                    )
+                    AssetRef.from(uploaded)
+                }.getOrNull()
+            }
+
+            additions.add(source.copy(order = order, relativePath = path, thumbAsset = thumb))
+        }
+
+        val all = existing + additions
+        val paths = all.map { it.relativePath }
+        val summary = detail.summary
+
+        val manifest = Manifest.payload(
+            archiveId = summary.archiveId,
+            createdAt = summary.createdAt,
+            sourceName = summary.sourceName,
+            sourceType = summary.sourceType,
+            totalItems = all.size,
+            items = all.map { Manifest.itemFrom(it) }
+        )
+
+        client.listReleaseAssets(summary.releaseId)
+            .firstOrNull { it.optString("name") == Format.MANIFEST_ASSET_NAME }
+            ?.let { stale -> runCatching { client.deleteAsset(stale.optLong("id")) } }
+
+        client.uploadAssetBytes(
+            releaseId = summary.releaseId,
+            assetName = Format.MANIFEST_ASSET_NAME,
+            payload = PyJson.indented(manifest).toByteArray(Charsets.UTF_8),
+            contentType = "application/json"
+        )
+
+        client.updateRelease(
+            summary.releaseId,
+            Format.titleFor(summary.sourceName, all.size),
+            Format.encodeArchiveBody(archiveMeta(summary, paths, detail.virtualFolders))
+        )
+    }
+
+    /** "photo.jpg" beside an existing "photo.jpg" becomes "photo (2).jpg". */
+    private fun uniqueName(taken: Set<String>, folder: String, candidate: String): String {
+        fun full(name: String) = if (folder.isEmpty()) name else "$folder/$name"
+        if (full(candidate) !in taken) return candidate
+        val stem = candidate.substringBeforeLast('.', candidate)
+        val ext = candidate.substringAfterLast('.', "")
+        var counter = 2
+        while (true) {
+            val next = if (ext.isEmpty()) "$stem ($counter)" else "$stem ($counter).$ext"
+            if (full(next) !in taken) return next
+            counter++
+        }
+    }
+
+    /**
      * Removes files from an archive.
      *
      * Deleting the assets alone would be enough for every reader - the spec drops manifest items
@@ -548,12 +644,20 @@ class DriveRepo(private val client: GitHubClient, private val cacheDir: File) {
             return@withContext true
         }
 
-        // Assets first: once these are gone the files are gone, whatever happens next.
+        // A copy shares its bytes with the original, so an asset is only really unused once no
+        // surviving entry still points at it. Deleting on sight would empty one file by removing
+        // another.
+        val stillReferenced = survivors.flatMap { it.parts }.map { it.assetId }.toSet()
+        val thumbsKept = survivors.mapNotNull { it.thumbAsset?.id }.toSet()
+
         for (entry in detail.entries.filter { !it.isFolder && it.relativePath in doomed }) {
             for (part in entry.parts) {
+                if (part.assetId in stillReferenced) continue
                 runCatching { client.deleteAsset(part.assetId) }
             }
-            entry.thumbAsset?.let { thumb -> runCatching { client.deleteAsset(thumb.id) } }
+            entry.thumbAsset?.let { thumb ->
+                if (thumb.id !in thumbsKept) runCatching { client.deleteAsset(thumb.id) }
+            }
         }
 
         val paths = survivors.map { it.relativePath }

@@ -581,6 +581,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         applyRewrite(changes, "Moved $count file${if (count == 1) "" else "s"}")
     }
 
+    /** Copies the ticked files into [folder] of the same archive. */
+    fun copySelected(folder: String) {
+        val repo = repo() ?: return
+        val current = detail ?: return
+        val entries = selectedFiles()
+        val target = folder.trim().trim('/')
+        clearSelection()
+        if (entries.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                repo.copyEntries(current, entries, target)
+                details.remove(current.summary.releaseId)
+                val reloaded = repo.loadDetail(current.summary)
+                details[current.summary.releaseId] = reloaded
+                detail = reloaded
+                banner = "Copied ${entries.size} file${if (entries.size == 1) "" else "s"}"
+                refreshArchives()
+            } catch (e: Exception) {
+                banner = friendly(e)
+            }
+        }
+    }
+
     /** Renames one file, or one folder and everything under it. */
     fun renameSelected(newName: String) {
         val current = detail ?: return

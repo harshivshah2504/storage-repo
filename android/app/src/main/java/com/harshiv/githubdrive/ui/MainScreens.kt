@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileMove
@@ -384,6 +385,7 @@ fun BrowseScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
+    var copying by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -437,6 +439,9 @@ fun BrowseScreen(
                         }
                         IconButton(onClick = { moving = true }, enabled = any) {
                             Icon(Icons.Filled.DriveFileMove, contentDescription = "Move selected")
+                        }
+                        IconButton(onClick = { copying = true }, enabled = any) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy selected")
                         }
                         IconButton(onClick = { onSaveMany() }, enabled = any) {
                             Icon(Icons.Filled.Download, contentDescription = "Save selected")
@@ -558,10 +563,20 @@ fun BrowseScreen(
     }
 
     if (moving) {
-        MoveDialog(
+        FolderPickerDialog(
+            title = "Move to",
             folders = vm.foldersInArchive(),
             onDismiss = { moving = false },
-            onMove = { folder -> moving = false; vm.moveSelected(folder) }
+            onPick = { folder -> moving = false; vm.moveSelected(folder) }
+        )
+    }
+
+    if (copying) {
+        FolderPickerDialog(
+            title = "Copy to",
+            folders = vm.foldersInArchive(),
+            onDismiss = { copying = false },
+            onPick = { folder -> copying = false; vm.copySelected(folder) }
         )
     }
 
@@ -617,16 +632,18 @@ private fun TextPromptDialog(
 }
 
 /**
- * Where to move the picked files.
+ * Where the picked files should go.
  *
- * Nothing is transferred by a move - the archive only records where a file sits - so this is a
- * list of the folders that already exist, plus the top of the archive and a new one.
+ * Neither moving nor copying transfers anything - the archive records where a file sits and a copy
+ * is a second record of the same bytes - so this is just the folders that already exist, plus the
+ * top of the archive and a new one.
  */
 @Composable
-private fun MoveDialog(
+private fun FolderPickerDialog(
+    title: String,
     folders: List<String>,
     onDismiss: () -> Unit,
-    onMove: (String) -> Unit
+    onPick: (String) -> Unit
 ) {
     var naming by remember { mutableStateOf(false) }
 
@@ -634,30 +651,30 @@ private fun MoveDialog(
         TextPromptDialog(
             title = "New folder",
             initial = "",
-            confirm = "Move here",
+            confirm = "Use this folder",
             onDismiss = { naming = false },
-            onConfirm = { name -> naming = false; onMove(name) }
+            onConfirm = { name -> naming = false; onPick(name) }
         )
         return
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Move to") },
+        title = { Text(title) },
         text = {
             LazyColumn(Modifier.heightIn(max = 320.dp)) {
                 item {
                     ListItem(
                         headlineContent = { Text("Top of this archive") },
                         leadingContent = { Icon(Icons.Filled.Folder, contentDescription = null) },
-                        modifier = Modifier.clickable { onMove("") }
+                        modifier = Modifier.clickable { onPick("") }
                     )
                 }
                 items(folders, key = { it }) { folder ->
                     ListItem(
                         headlineContent = { Text(folder, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         leadingContent = { Icon(Icons.Filled.Folder, contentDescription = null) },
-                        modifier = Modifier.clickable { onMove(folder) }
+                        modifier = Modifier.clickable { onPick(folder) }
                     )
                 }
             }
