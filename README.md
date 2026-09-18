@@ -167,13 +167,22 @@ The CLI (`github-drive upload`, `download`, etc.) is **single-tenant**. It uses 
 
 ## Hosting
 
-The web app is deployable as a single-process Flask/Gunicorn service. The repository ships with three deployment hooks, all driving the same WSGI entry point `github_drive.webapp:create_app()`:
+**Render is the supported target.** The web app is a single long-running Flask/Gunicorn process, not a set of functions, and that rules out serverless hosts entirely:
+
+- A transfer takes minutes — hence `--timeout 600` in the `Procfile` — while a serverless invocation is killed in seconds.
+- Vercel caps a request body at 4.5 MB, so a file-storage app cannot accept files through it.
+- The task dispatcher, its per-user upload and download slots, and the metadata cache all live in process memory between requests.
+- The filesystem is read-only outside `/tmp`, and startup writes app state.
+
+Deploying to Vercel gets a 500 on every request, from `ensure_state_dir()` failing before any route runs. Fixing that yields an app that still cannot upload. Use Render.
+
+The same WSGI entry point, `github_drive.webapp:create_app()`, drives every hook:
 
 | File | Purpose |
 |---|---|
-| [render.yaml](render.yaml) | Render blueprint: build, start, health check, env-var slots |
-| [Procfile](Procfile) | Heroku/Railway/Fly Procfile-style platforms |
-| [Dockerfile](Dockerfile) | Portable container for any host (Fly.io, Cloud Run, ECS, self-hosted) |
+| [render.yaml](render.yaml) | Render blueprint: build, start, health check, env-var slots — **the supported path** |
+| [Procfile](Procfile) | Any other Procfile-style host that runs a persistent process |
+| [Dockerfile](Dockerfile) | Portable container for any host that runs a persistent process |
 
 ### Required environment variables on a hosted instance
 
