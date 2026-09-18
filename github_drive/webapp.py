@@ -81,6 +81,14 @@ _TASK_ORPHAN_GRACE_SECONDS = max(
 )
 
 
+
+def _max_concurrent_covers() -> int:
+    """How many covers may be generated at once. Each one decodes a full-size photo."""
+    return max(1, env_int("GITHUB_DRIVE_MAX_CONCURRENT_COVERS", 2))
+
+
+_COVER_SLOTS = threading.BoundedSemaphore(_max_concurrent_covers())
+
 def create_app() -> Flask:
     from . import db as db_module
     from werkzeug.middleware.proxy_fix import ProxyFix
@@ -563,6 +571,12 @@ def create_app() -> Flask:
         if int(legacy_image.get("size") or 0) > _cover_source_max_bytes():
             abort(404)
 
+        # Generating a cover means downloading the full photo and decoding it, which is hundreds
+        # of megabytes of pixel buffer per request. A grid that scrolls can ask for dozens at
+        # once, and on a small instance that is an out-of-memory kill rather than slow thumbnails.
+        # A cover is decoration: better to serve none than to take the server down for one.
+        if not _COVER_SLOTS.acquire(timeout=0.25):
+            abort(503)
         temp_dir = tempfile.mkdtemp(prefix="github-drive-cover-")
         try:
             asset_path = os.path.join(temp_dir, "asset")
@@ -590,6 +604,7 @@ def create_app() -> Flask:
                 headers={"Cache-Control": "private, max-age=600"},
             )
         finally:
+            _COVER_SLOTS.release()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     @app.delete("/api/archives/<int:release_id>")

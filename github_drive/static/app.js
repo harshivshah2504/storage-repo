@@ -1924,21 +1924,43 @@ function setupArchivesPagination() {
   const sentinel = $("archivesSentinel");
   if (!sentinel) return;
 
+  // One page fetched is one page of new cards, and every card asks the server for a cover. For
+  // an archive without a stored cover that means downloading the full photo and decoding it, so
+  // a burst of them is an out-of-memory kill rather than slow thumbnails.
+  //
+  // Left to itself the observer cascades: loading a page leaves the sentinel intersecting, which
+  // loads the next, which loads the next - the whole account, without anyone scrolling. So a
+  // fetch has to be armed, and only scrolling arms it. The exception is a viewport that is not
+  // full yet: there is nothing to scroll, so keep going until there is.
+  let armed = true;
+
+  const pageIsShort = () =>
+    document.documentElement.scrollHeight <= window.innerHeight + 40;
+
+  window.addEventListener("scroll", () => { armed = true; }, { passive: true });
+
+  const maybeLoad = async () => {
+    if (!armed) return;
+    if (!state.archiveHasMore || state.archiveLoading) return;
+    armed = false;
+    await loadMoreArchives();
+    if (pageIsShort()) armed = true;
+  };
+
   if (!("IntersectionObserver" in window)) {
-    // Very old browsers: fall back to watching the scroll position.
     window.addEventListener("scroll", () => {
       const nearBottom =
-        window.innerHeight + window.scrollY >= document.body.offsetHeight - 600;
-      if (nearBottom) loadMoreArchives();
+        window.innerHeight + window.scrollY >= document.body.offsetHeight - 400;
+      if (nearBottom) maybeLoad();
     }, { passive: true });
     return;
   }
 
   const observer = new IntersectionObserver(
     (entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) loadMoreArchives();
+      if (entries.some((entry) => entry.isIntersecting)) maybeLoad();
     },
-    { rootMargin: "600px 0px" }
+    { rootMargin: "400px 0px" }
   );
   observer.observe(sentinel);
 }
