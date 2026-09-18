@@ -1,4 +1,4 @@
-/* GitHub Drive — Drive-style frontend behaviour */
+/* MemVault — Drive-style frontend behaviour */
 
 const state = {
   archives: [],
@@ -375,7 +375,7 @@ async function exportAccountData() {
 }
 
 async function deleteAccount() {
-  if (!confirm("Delete your GitHub Drive account from this server? Your GitHub releases are not deleted.")) return;
+  if (!confirm("Delete your MemVault account on this server? The files in your own storage are not touched.")) return;
   if (!confirm("This removes your login, saved token, and server task history. Continue?")) return;
   try {
     await fetchJson("/api/me", { method: "DELETE" });
