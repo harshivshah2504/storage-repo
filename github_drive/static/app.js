@@ -572,8 +572,9 @@ function syncArchivesPagination() {
   // The sentinel has to stay in the document while there is more to fetch: it is what the
   // observer watches, and hiding it would stop the page ever asking for the next batch.
   const hasLoadedAny = state.archives.length > 0;
+  // Hidden the moment GitHub stops offering a next page, so reaching the end looks like the end.
   sentinel.style.display = hasLoadedAny && state.archiveHasMore ? "" : "none";
-  note.textContent = state.archiveLoading ? "Loading more…" : "Scroll for more";
+  note.textContent = state.archiveLoading ? "Loading more…" : "More below";
 }
 
 async function deleteArchiveRecord(archive) {
@@ -1924,43 +1925,53 @@ function setupArchivesPagination() {
   const sentinel = $("archivesSentinel");
   if (!sentinel) return;
 
-  // One page fetched is one page of new cards, and every card asks the server for a cover. For
-  // an archive without a stored cover that means downloading the full photo and decoding it, so
-  // a burst of them is an out-of-memory kill rather than slow thumbnails.
+  // Paced, not armed. An earlier version required a scroll event to unlock the next page, which
+  // deadlocked at the foot of the page: once you are at the bottom there is nothing left to
+  // scroll, no event fires, and the sentinel sits there asking to be scrolled to forever.
   //
-  // Left to itself the observer cascades: loading a page leaves the sentinel intersecting, which
-  // loads the next, which loads the next - the whole account, without anyone scrolling. So a
-  // fetch has to be armed, and only scrolling arms it. The exception is a viewport that is not
-  // full yet: there is nothing to scroll, so keep going until there is.
-  let armed = true;
+  // Instead: fetch while the end of the grid is actually on screen, half a second apart, and stop
+  // the moment it is not. Leaving the page parked at the bottom keeps loading, which is what
+  // infinite scrolling means; scrolling away stops it mid-way.
+  const COOLDOWN_MS = 500;
+  let visible = false;
+  let lastLoadAt = 0;
+  let pending = null;
 
-  const pageIsShort = () =>
-    document.documentElement.scrollHeight <= window.innerHeight + 40;
+  const pump = async () => {
+    pending = null;
+    if (!visible || !state.archiveHasMore || state.archiveLoading) return;
 
-  window.addEventListener("scroll", () => { armed = true; }, { passive: true });
+    const wait = COOLDOWN_MS - (Date.now() - lastLoadAt);
+    if (wait > 0) {
+      pending = setTimeout(pump, wait);
+      return;
+    }
 
-  const maybeLoad = async () => {
-    if (!armed) return;
-    if (!state.archiveHasMore || state.archiveLoading) return;
-    armed = false;
+    lastLoadAt = Date.now();
     await loadMoreArchives();
-    if (pageIsShort()) armed = true;
+    if (visible && state.archiveHasMore) pending = setTimeout(pump, COOLDOWN_MS);
+  };
+
+  const setVisible = (next) => {
+    visible = next;
+    if (!visible) {
+      if (pending) clearTimeout(pending);
+      pending = null;
+      return;
+    }
+    if (!pending) pump();
   };
 
   if (!("IntersectionObserver" in window)) {
     window.addEventListener("scroll", () => {
-      const nearBottom =
-        window.innerHeight + window.scrollY >= document.body.offsetHeight - 400;
-      if (nearBottom) maybeLoad();
+      setVisible(window.innerHeight + window.scrollY >= document.body.offsetHeight - 300);
     }, { passive: true });
     return;
   }
 
   const observer = new IntersectionObserver(
-    (entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) maybeLoad();
-    },
-    { rootMargin: "400px 0px" }
+    (entries) => setVisible(entries.some((entry) => entry.isIntersecting)),
+    { rootMargin: "300px 0px" }
   );
   observer.observe(sentinel);
 }
