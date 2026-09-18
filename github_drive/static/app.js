@@ -601,7 +601,14 @@ function syncArchiveBrowserToolbar() {
   const tag = $("archiveDetailTagText");
   const button = $("downloadCurrentFolderButton");
   if (tag) {
-    tag.textContent = archive?.tag ? `Tag: ${archive.tag}` : "";
+    // A very large archive is served in part so that one listing cannot exhaust the server. Say
+    // so plainly rather than quietly showing a slice as if it were everything.
+    if (contents?.truncated) {
+      const shown = (contents.entries || []).length;
+      tag.textContent = `Showing ${shown} of ${contents.total_entries} files`;
+    } else {
+      tag.textContent = archive?.tag ? `Tag: ${archive.tag}` : "";
+    }
   }
   syncNewMenuState();
   if (!button) return;

@@ -141,6 +141,16 @@ def list_remote_archives_page(
     return list_drive_archives_page(client or get_client(), page=page, per_page=per_page)
 
 
+def _max_archive_entries() -> int:
+    """How many entries one archive listing may return. 0 or less means no limit."""
+    raw = os.environ.get("GITHUB_DRIVE_MAX_ARCHIVE_ENTRIES")
+    try:
+        value = int(raw) if raw else 5000
+    except ValueError:
+        value = 5000
+    return value if value > 0 else 10 ** 9
+
+
 def list_archive_contents(
     release_id: Optional[int] = None,
     tag: Optional[str] = None,
@@ -155,7 +165,20 @@ def list_archive_contents(
         archive_id=archive_id,
     )
     entries = _flatten_archive_entries(items, storage_mode, archive_meta)
+
+    # One request must not be able to take the service down. Gunicorn runs a single worker here,
+    # so a response big enough to exhaust memory does not fail that request - it kills the process
+    # and everyone else's session with it. A folder of tens of thousands of files is served in
+    # part, with the count so the caller can say so, rather than gambling the whole site on it.
+    total_entries = len(entries)
+    limit = _max_archive_entries()
+    truncated = total_entries > limit
+    if truncated:
+        entries = entries[:limit]
+
     return {
+        "truncated": truncated,
+        "total_entries": total_entries,
         "release_id": release["id"],
         "tag": release.get("tag_name", ""),
         "name": release.get("name") or release.get("tag_name") or "",

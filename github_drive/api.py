@@ -336,16 +336,24 @@ class GitHubClient:
         params = {"per_page": 100}
         while True:
             response = self._request("GET", url, params=params)
-            assets.extend(response.json())
+            # Kept down to the four fields anything here reads. GitHub sends about twenty per
+            # asset, including a whole nested uploader object, and an archive of a few thousand
+            # files has an asset each plus a preview - so the difference between holding all of it
+            # and holding four fields is the difference between fitting in memory and not.
+            assets.extend(_slim_asset(item) for item in response.json())
             next_url = _parse_next_link(response.headers.get("Link", ""))
             if not next_url:
                 break
             url = next_url
             params = None
-        _cache_set(_ASSETS_CACHE, (self._cache_namespace, release_id), assets)
-        with _CACHE_LOCK:
-            for asset in assets:
-                _ASSET_TO_RELEASE[(self._cache_namespace, int(asset["id"]))] = release_id
+
+        # A very large archive is exactly the one worth not keeping a copy of. Caching it would
+        # hold the whole list for the TTL, and opening two of them in a row would hold both.
+        if len(assets) <= _assets_cache_max_items():
+            _cache_set(_ASSETS_CACHE, (self._cache_namespace, release_id), assets)
+            with _CACHE_LOCK:
+                for asset in assets:
+                    _ASSET_TO_RELEASE[(self._cache_namespace, int(asset["id"]))] = release_id
         return assets
 
     def upload_asset(
@@ -696,6 +704,20 @@ def _assets_cache_ttl() -> float:
 
 def _asset_bytes_cache_ttl() -> float:
     return _env_float("GITHUB_DRIVE_ASSET_BYTES_CACHE_TTL_SECONDS", 600.0)
+
+
+def _slim_asset(asset: Dict) -> Dict:
+    """The only asset fields this project reads. Everything else GitHub sends is dropped."""
+    return {
+        "id": asset.get("id"),
+        "name": asset.get("name") or "",
+        "size": asset.get("size") or 0,
+        "content_type": asset.get("content_type") or "application/octet-stream",
+    }
+
+
+def _assets_cache_max_items() -> int:
+    return _env_int("GITHUB_DRIVE_ASSETS_CACHE_MAX_ITEMS", 2000)
 
 
 def _asset_bytes_cache_max_bytes() -> int:
