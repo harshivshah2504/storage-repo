@@ -165,6 +165,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var autoUploadWifiOnly by mutableStateOf(prefs.autoUploadWifiOnly)
         private set
 
+    /** What the last backup run did. Empty until one has run. */
+    var backupStatus by mutableStateOf(prefs.autoUploadLastResult)
+        private set
+    var backupLastRunAt by mutableStateOf(prefs.autoUploadLastRunAt)
+        private set
+
     private var signInJob: Job? = null
 
     /** A granted token whose account setup has not finished yet. Survives a failed setup attempt. */
@@ -367,10 +373,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * watermark is reset to this moment, so nobody hands their whole camera roll to a phone
      * connection by flipping a switch. The caller is responsible for holding the media permission.
      */
-    fun backUpGallery(enabled: Boolean) {
+    /**
+     * Turns the gallery backup on or off.
+     *
+     * [includeExisting] decides where it starts: from this moment, or from the beginning of the
+     * camera roll. "From now on" is the safe default - nobody should hand a phone connection ten
+     * years of photos by flicking a switch - but it is also why the backup can look broken, since
+     * nothing happens until the next photo is taken.
+     */
+    fun backUpGallery(enabled: Boolean, includeExisting: Boolean = false) {
         if (enabled) {
-            prefs.autoUploadSince = System.currentTimeMillis() / 1000L
+            prefs.autoUploadSince = if (includeExisting) 0L else System.currentTimeMillis() / 1000L
             prefs.autoUploadLastId = 0L
+            prefs.autoUploadLastResult = ""
+            prefs.autoUploadLastRunAt = 0L
+            backupStatus = ""
+            backupLastRunAt = 0L
         }
         prefs.autoUpload = enabled
         autoUpload = enabled
@@ -775,6 +793,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refreshStorageUsed(force: Boolean = false) {
         storedBytes = prefs.storedBytes
+        backupStatus = prefs.autoUploadLastResult
+        backupLastRunAt = prefs.autoUploadLastRunAt
         viewModelScope.launch {
             cacheBytes = withContext(Dispatchers.IO) { repo()?.cacheBytes() ?: 0L }
         }

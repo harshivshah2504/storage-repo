@@ -223,7 +223,9 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
             onClearCache = { vm.clearCache() },
             autoUpload = vm.autoUpload,
             autoUploadWifiOnly = vm.autoUploadWifiOnly,
-            onAutoUpload = { vm.backUpGallery(it) },
+            backupStatus = vm.backupStatus,
+            backupLastRunAt = vm.backupLastRunAt,
+            onAutoUpload = { on, everything -> vm.backUpGallery(on, everything) },
             onAutoUploadWifiOnly = { vm.backUpOnWifiOnly(it) },
             onOpenRepo = {
                 val url = "https://github.com/${vm.login}/${vm.repoName}"

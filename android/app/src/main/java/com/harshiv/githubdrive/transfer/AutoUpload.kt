@@ -28,7 +28,7 @@ import com.harshiv.githubdrive.drive.Picking
 import com.harshiv.githubdrive.drive.UploadItem
 import com.harshiv.githubdrive.drive.Uploader
 import com.harshiv.githubdrive.github.GitHubClient
-import java.io.IOException
+import com.harshiv.githubdrive.github.GitHubException
 import java.time.Duration
 import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
@@ -182,26 +182,67 @@ object AutoUpload {
 
             val uploader = Uploader(applicationContext, GitHubClient(token, owner, prefs.repoName))
 
+            var done = 0
+            var skipped = 0
+
             for (media in pending) {
                 if (isStopped) return Result.retry()
                 try {
                     uploader.upload(media.name, listOf(UploadItem(media.uri, media.name, media.size)))
-                } catch (e: IOException) {
-                    // The network went away mid-backup. Leave the watermark where it is and let
-                    // WorkManager bring us back; nothing is lost and nothing uploads twice.
-                    return Result.retry()
+                    done++
                 } catch (e: Exception) {
-                    // A file that cannot be read or that GitHub refuses must not wedge the queue
-                    // forever, so it is stepped over rather than retried until the end of time.
+                    if (!refusedOutright(e)) {
+                        // The network went, or GitHub did. The watermark stays where it is so
+                        // this photo is picked up next time - advancing past it would lose it
+                        // permanently, since nothing ever looks backwards.
+                        note(prefs, "Paused: ${readable(e)}", done)
+                        return Result.retry()
+                    }
+                    // GitHub refused this particular file. Stepping over it is right; retrying
+                    // forever would wedge every photo behind it.
+                    skipped++
                 }
                 prefs.autoUploadSince = media.dateAdded
                 prefs.autoUploadLastId = media.id
             }
 
+            note(
+                prefs,
+                if (skipped == 0) "Backed up $done" else "Backed up $done, skipped $skipped",
+                done
+            )
+
             // A full batch means the camera roll probably has more waiting. Rather than hold this
             // wake-up open, hand the rest to a fresh run under the same constraints.
             if (pending.size >= BATCH) runNow(applicationContext)
             return Result.success()
+        }
+
+        /**
+         * Whether GitHub rejected this particular file, as opposed to the run going wrong.
+         *
+         * This distinction is the whole difference between a backup that works and one that
+         * quietly loses photos. Every failure used to land in the same catch, which stepped over
+         * the file and moved the watermark past it - so a momentary network drop did not pause
+         * the backup, it silently abandoned everything in that batch, permanently.
+         */
+        private fun refusedOutright(e: Exception): Boolean =
+            e is GitHubException && e.status in setOf(400, 413, 422)
+
+        private fun readable(e: Exception): String = when {
+            e is GitHubException && e.status == 401 -> "sign-in expired"
+            e is GitHubException && e.status == 403 -> "GitHub refused (limit?)"
+            e is GitHubException && e.status == 404 -> "storage missing"
+            e is GitHubException && e.status == 0 -> "no connection"
+            e is GitHubException -> "GitHub error ${e.status}"
+            else -> e.message?.take(60) ?: "unknown error"
+        }
+
+        /** Leaves a trace of what the last run did, so Settings can show it rather than silence. */
+        private fun note(prefs: com.harshiv.githubdrive.core.Prefs, summary: String, done: Int) {
+            prefs.autoUploadLastRunAt = System.currentTimeMillis()
+            prefs.autoUploadLastResult = summary
+            if (done > 0) prefs.autoUploadTotal = prefs.autoUploadTotal + done
         }
 
         private fun foregroundInfo(): ForegroundInfo {

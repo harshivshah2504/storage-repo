@@ -46,6 +46,18 @@ fun formatBytes(bytes: Long): String {
     return String.format(Locale.ROOT, if (value >= 10) "%.0f %s" else "%.1f %s", value, units[index])
 }
 
+/** "just now", "3 hours ago" - for the last-run line on a setting. */
+fun relativeTime(epochMillis: Long): String {
+    if (epochMillis <= 0L) return "not yet"
+    val seconds = (System.currentTimeMillis() - epochMillis) / 1000L
+    return when {
+        seconds < 60 -> "just now"
+        seconds < 3600 -> "${seconds / 60} min ago"
+        seconds < 86_400 -> "${seconds / 3600} hr ago"
+        else -> "${seconds / 86_400} days ago"
+    }
+}
+
 /** Turns the ISO timestamp in the release body into something readable. */
 fun formatDate(iso: String): String {
     if (iso.length < 10) return iso

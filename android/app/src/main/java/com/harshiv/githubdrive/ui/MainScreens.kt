@@ -979,13 +979,16 @@ fun SettingsScreen(
     onClearCache: () -> Unit,
     autoUpload: Boolean,
     autoUploadWifiOnly: Boolean,
-    onAutoUpload: (Boolean) -> Unit,
+    backupStatus: String,
+    backupLastRunAt: Long,
+    onAutoUpload: (Boolean, Boolean) -> Unit,
     onAutoUploadWifiOnly: (Boolean) -> Unit,
     onOpenRepo: () -> Unit,
     onSignOut: () -> Unit,
     onBack: () -> Unit
 ) {
     var confirmSignOut by remember { mutableStateOf(false) }
+    var askScope by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) { onRefreshStorageUsed() }
@@ -995,7 +998,7 @@ fun SettingsScreen(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
         if (AutoUpload.canReadGallery(context)) {
-            onAutoUpload(true)
+            askScope = true
         } else {
             Toast.makeText(
                 context,
@@ -1059,10 +1062,11 @@ fun SettingsScreen(
                 headlineContent = { Text("Back up my photos") },
                 supportingContent = {
                     Text(
-                        if (autoUpload) {
-                            "Photos and videos you take go up on their own, overnight."
-                        } else {
-                            "Photos and videos you take from now on will go up overnight."
+                        when {
+                            !autoUpload -> "Photos and videos go up on their own, overnight."
+                            backupStatus.isNotEmpty() ->
+                                "$backupStatus - ${relativeTime(backupLastRunAt)}"
+                            else -> "On. Nothing has run yet; it goes overnight on Wi-Fi."
                         }
                     )
                 },
@@ -1072,9 +1076,9 @@ fun SettingsScreen(
                         checked = autoUpload,
                         onCheckedChange = { wanted ->
                             if (!wanted) {
-                                onAutoUpload(false)
+                                onAutoUpload(false, false)
                             } else if (AutoUpload.canReadGallery(context)) {
-                                onAutoUpload(true)
+                                askScope = true
                             } else {
                                 askForGallery.launch(AutoUpload.mediaPermissions())
                             }
@@ -1122,6 +1126,29 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth().padding(16.dp)
             )
         }
+    }
+
+    if (askScope) {
+        AlertDialog(
+            onDismissRequest = { askScope = false },
+            title = { Text("What should go up?") },
+            text = {
+                Text(
+                    "Everything backs up your whole gallery, which can be a lot of data on a " +
+                        "phone connection. New photos only starts from now."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { askScope = false; onAutoUpload(true, true) }) {
+                    Text("Everything")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { askScope = false; onAutoUpload(true, false) }) {
+                    Text("New photos only")
+                }
+            }
+        )
     }
 
     if (confirmSignOut) {

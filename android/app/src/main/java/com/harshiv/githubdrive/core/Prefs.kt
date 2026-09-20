@@ -114,6 +114,19 @@ class Prefs(context: Context) {
         get() = prefs.getLong(KEY_AUTO_UPLOAD_SINCE, 0L)
         set(value) = prefs.edit().putLong(KEY_AUTO_UPLOAD_SINCE, value).apply()
 
+    /** What the last backup run did, so the setting can show evidence rather than silence. */
+    var autoUploadLastRunAt: Long
+        get() = prefs.getLong(KEY_AUTO_UPLOAD_LAST_RUN, 0L)
+        set(value) = prefs.edit().putLong(KEY_AUTO_UPLOAD_LAST_RUN, value).apply()
+
+    var autoUploadLastResult: String
+        get() = prefs.getString(KEY_AUTO_UPLOAD_LAST_RESULT, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_AUTO_UPLOAD_LAST_RESULT, value).apply()
+
+    var autoUploadTotal: Int
+        get() = prefs.getInt(KEY_AUTO_UPLOAD_TOTAL, 0)
+        set(value) = prefs.edit().putInt(KEY_AUTO_UPLOAD_TOTAL, value).apply()
+
     var autoUploadLastId: Long
         get() = prefs.getLong(KEY_AUTO_UPLOAD_LAST_ID, 0L)
         set(value) = prefs.edit().putLong(KEY_AUTO_UPLOAD_LAST_ID, value).apply()
@@ -191,5 +204,8 @@ class Prefs(context: Context) {
         private const val KEY_AUTO_UPLOAD_WIFI = "auto_upload_wifi_only"
         private const val KEY_AUTO_UPLOAD_SINCE = "auto_upload_since"
         private const val KEY_AUTO_UPLOAD_LAST_ID = "auto_upload_last_id"
+        private const val KEY_AUTO_UPLOAD_LAST_RUN = "auto_upload_last_run"
+        private const val KEY_AUTO_UPLOAD_LAST_RESULT = "auto_upload_last_result"
+        private const val KEY_AUTO_UPLOAD_TOTAL = "auto_upload_total"
     }
 }
