@@ -8,6 +8,7 @@ import com.harshiv.githubdrive.core.PyJson
 import com.harshiv.githubdrive.github.GitHubClient
 import com.harshiv.githubdrive.github.GitHubException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -45,7 +46,8 @@ class Uploader(
         virtualFolders: List<String> = emptyList(),
         resumeTag: String? = null,
         onProgress: (Progress) -> Unit = {},
-        onSkipped: (relativePath: String, reason: String) -> Unit = { _, _ -> }
+        onSkipped: (relativePath: String, reason: String) -> Unit = { _, _ -> },
+        onArchiveOpened: (tag: String) -> Unit = {}
     ): ArchiveSummary = withContext(Dispatchers.IO) {
         if (items.isEmpty()) throw UploadException("No files were found to upload.")
 
@@ -90,6 +92,9 @@ class Uploader(
             client.updateRelease(release.optLong("id"), title, Format.encodeArchiveBody(meta))
         }
         val releaseId = release.optLong("id")
+        // Handed out as soon as the release exists: a retry that knows the tag resumes into this
+        // same archive and skips everything already stored, instead of starting a second one.
+        onArchiveOpened(tag)
 
         // Snapshot taken once; concurrent name clashes fall back to GitHub's already_exists handling.
         val existingAssets = client.listReleaseAssets(releaseId).associateBy { it.optString("name") }
@@ -106,11 +111,15 @@ class Uploader(
             onProgress(Progress(order, entries.size, bytesSent, totalBytes, item.relativePath))
 
             try {
-                uploadEntry(releaseId, order, item, entries.size, totalBytes, bytesSent, existingAssets, onProgress)
-                    .let { result ->
-                        bytesSent = result.bytesSent
-                        manifestItems.add(result.manifestItem)
-                    }
+                waitingOutTrouble {
+                    uploadEntry(
+                        releaseId, order, item, entries.size, totalBytes, bytesSent,
+                        existingAssets, onProgress
+                    )
+                }.let { result ->
+                    bytesSent = result.bytesSent
+                    manifestItems.add(result.manifestItem)
+                }
             } catch (e: GitHubException) {
                 // GitHub refused this particular file: too big for one asset, a name it will not
                 // take, something unreadable behind the URI. One bad file in two thousand must not
@@ -181,6 +190,33 @@ class Uploader(
         (context.applicationContext as? GdApp)?.prefs?.addStoredBytes(summary.totalAssetBytes - alreadyStoredBytes)
 
         summary
+    }
+
+    /**
+     * Rides out a connection that comes and goes.
+     *
+     * An upload of thousands of files runs for hours, and a phone will lose its network somewhere
+     * in there. Three quick retries inside the HTTP client do not cover a lift or a dead spot, and
+     * failing the whole run means starting a nineteen-gigabyte folder again. So a transport
+     * failure waits and tries again, backing off to half a minute between attempts.
+     *
+     * Only for failures that might pass. A refused file, an expired token or a missing repository
+     * will not heal by waiting, and pretending otherwise just delays the bad news.
+     */
+    private suspend fun <T> waitingOutTrouble(attempts: Int = 6, block: suspend () -> T): T {
+        var last: GitHubException? = null
+        repeat(attempts) { attempt ->
+            coroutineContext.ensureActive()
+            try {
+                return block()
+            } catch (e: GitHubException) {
+                if (e.status in SKIPPABLE_STATUSES) throw e
+                if (e.status in PERMANENT_STATUSES) throw e
+                last = e
+                delay(minOf(30_000L, 2_000L * (1L shl attempt)))
+            }
+        }
+        throw last ?: GitHubException(0, "upload failed")
     }
 
     private class EntryResult(val bytesSent: Long, val manifestItem: Map<String, Any?>)
@@ -425,5 +461,8 @@ class Uploader(
          * can resume it.
          */
         private val SKIPPABLE_STATUSES = setOf(400, 413, 422)
+
+        /** Waiting will not fix these, so they surface immediately. */
+        private val PERMANENT_STATUSES = setOf(401, 403, 404)
     }
 }

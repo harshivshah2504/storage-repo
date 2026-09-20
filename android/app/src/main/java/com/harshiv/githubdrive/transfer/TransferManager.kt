@@ -61,6 +61,27 @@ object TransferManager {
     private val nextId = AtomicLong(1L)
     private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
+    /**
+     * What a failed upload needs in order to carry on.
+     *
+     * An upload of thousands of files can die hours in. Keeping the parameters means Retry
+     * resumes into the same archive - the uploader skips every asset already there - rather than
+     * starting the whole folder again.
+     */
+    private class Resumable(
+        val uploader: Uploader,
+        val sourceName: String,
+        val items: List<UploadItem>,
+        val virtualFolders: List<String>,
+        val onFinished: () -> Unit,
+        var tag: String? = null
+    )
+
+    private val resumable = java.util.concurrent.ConcurrentHashMap<Long, Resumable>()
+
+    /** True when this transfer can be picked up where it stopped. */
+    fun canResume(id: Long): Boolean = resumable.containsKey(id)
+
     private val _transfers = MutableStateFlow<List<Transfer>>(emptyList())
     val transfers: StateFlow<List<Transfer>> = _transfers
 
@@ -72,6 +93,7 @@ object TransferManager {
         sourceName: String,
         items: List<UploadItem>,
         virtualFolders: List<String> = emptyList(),
+        resumeTag: String? = null,
         onFinished: () -> Unit = {}
     ): Long {
         val appContext = context.applicationContext
@@ -89,6 +111,9 @@ object TransferManager {
         )
         startService(appContext)
 
+        val memo = Resumable(uploader, sourceName, items, virtualFolders, onFinished, resumeTag)
+        resumable[id] = memo
+
         val job = scope.launch {
             try {
                 if (uploadGate.isLocked) update(id) { it.copy(detail = "Waiting its turn") }
@@ -98,6 +123,8 @@ object TransferManager {
                         sourceName = sourceName,
                         items = items,
                         virtualFolders = virtualFolders,
+                        resumeTag = memo.tag,
+                        onArchiveOpened = { tag -> memo.tag = tag },
                         onProgress = { progress ->
                             update(id) {
                                 it.copy(
@@ -112,6 +139,7 @@ object TransferManager {
                         onSkipped = { _, _ -> skippedCount++ }
                     )
                 }
+                resumable.remove(id)
                 update(id) {
                     it.copy(
                         state = TransferState.DONE,
@@ -204,9 +232,34 @@ object TransferManager {
 
     fun cancel(id: Long) {
         jobs[id]?.cancel()
+        resumable.remove(id)
+    }
+
+    /**
+     * Carries on a failed upload.
+     *
+     * The archive it had already opened is reused, so every file that made it stays put and only
+     * the remainder goes up. A nineteen-gigabyte folder that died at eighteen has one gigabyte
+     * left to do, not nineteen.
+     */
+    fun resume(context: Context, id: Long): Long? {
+        val memo = resumable[id] ?: return null
+        _transfers.update { list -> list.filterNot { it.id == id } }
+        resumable.remove(id)
+        return startUpload(
+            context = context,
+            uploader = memo.uploader,
+            sourceName = memo.sourceName,
+            items = memo.items,
+            virtualFolders = memo.virtualFolders,
+            resumeTag = memo.tag,
+            onFinished = memo.onFinished
+        )
     }
 
     fun clearFinished() {
+        val kept = _transfers.value.filter { it.state == TransferState.RUNNING }.map { it.id }.toSet()
+        resumable.keys.retainAll { it in kept }
         _transfers.update { list -> list.filter { it.state == TransferState.RUNNING } }
     }
 

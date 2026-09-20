@@ -883,6 +883,8 @@ private fun EntryRow(
 fun TransfersScreen(
     transfers: List<Transfer>,
     onCancel: (Long) -> Unit,
+    onResume: (Long) -> Unit,
+    canResume: (Long) -> Boolean,
     onClear: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -915,7 +917,7 @@ fun TransfersScreen(
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
                 items(transfers, key = { it.id }) { transfer ->
-                    TransferRow(transfer, onCancel)
+                    TransferRow(transfer, onCancel, onResume, canResume)
                     HorizontalDivider()
                 }
             }
@@ -924,7 +926,12 @@ fun TransfersScreen(
 }
 
 @Composable
-private fun TransferRow(transfer: Transfer, onCancel: (Long) -> Unit) {
+private fun TransferRow(
+    transfer: Transfer,
+    onCancel: (Long) -> Unit,
+    onResume: (Long) -> Unit = {},
+    canResume: (Long) -> Boolean = { false }
+) {
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
@@ -947,8 +954,12 @@ private fun TransferRow(transfer: Transfer, onCancel: (Long) -> Unit) {
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            if (transfer.state == TransferState.RUNNING) {
-                TextButton(onClick = { onCancel(transfer.id) }) { Text("Stop") }
+            when {
+                transfer.state == TransferState.RUNNING ->
+                    TextButton(onClick = { onCancel(transfer.id) }) { Text("Stop") }
+                // Resuming reuses the archive already opened, so only what is missing goes up.
+                transfer.state == TransferState.FAILED && canResume(transfer.id) ->
+                    TextButton(onClick = { onResume(transfer.id) }) { Text("Resume") }
             }
         }
         if (transfer.state == TransferState.RUNNING) {

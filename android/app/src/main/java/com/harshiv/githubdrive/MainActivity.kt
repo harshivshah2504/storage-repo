@@ -126,7 +126,17 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
     val pickFolder = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        if (uri != null) vm.uploadFolder(uri)
+        if (uri != null) {
+            // Held onto so the folder stays readable for the length of a long upload, and after
+            // the app has been away in the background.
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            vm.uploadFolder(uri)
+        }
     }
 
     val saveFile = rememberLauncherForActivityResult(
@@ -210,6 +220,8 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
         Screen.TRANSFERS -> TransfersScreen(
             transfers = transfers,
             onCancel = { TransferManager.cancel(it) },
+            onResume = { TransferManager.resume(context, it) },
+            canResume = { TransferManager.canResume(it) },
             onClear = { TransferManager.clearFinished() },
             onBack = { screen = Screen.ARCHIVES }
         )
