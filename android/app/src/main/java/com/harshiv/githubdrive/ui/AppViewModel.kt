@@ -402,6 +402,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Backs up the gallery now, without waiting for tonight or needing the schedule switched on.
+     *
+     * [includeExisting] only matters the first time: with no watermark recorded there is nothing
+     * to carry on from, so the caller has to say whether that means the whole gallery or nothing
+     * before this moment.
+     */
+    fun backUpNow(includeExisting: Boolean? = null) {
+        if (includeExisting != null) {
+            prefs.autoUploadSince = if (includeExisting) 0L else System.currentTimeMillis() / 1000L
+            prefs.autoUploadLastId = 0L
+        }
+        prefs.autoUploadLastResult = "Backing up..."
+        prefs.autoUploadLastRunAt = System.currentTimeMillis()
+        backupStatus = prefs.autoUploadLastResult
+        backupLastRunAt = prefs.autoUploadLastRunAt
+        AutoUpload.backUpNow(getApplication())
+        banner = "Backing up in the background"
+    }
+
+    /** True when no backup has ever been configured, so "now" has no starting point yet. */
+    val backupNeedsScope: Boolean
+        get() = prefs.autoUploadSince == 0L && prefs.autoUploadLastId == 0L
+
     fun backUpOnWifiOnly(wifiOnly: Boolean) {
         prefs.autoUploadWifiOnly = wifiOnly
         autoUploadWifiOnly = wifiOnly

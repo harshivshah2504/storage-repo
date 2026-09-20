@@ -751,6 +751,15 @@ private fun FolderPickerDialog(
     )
 }
 
+/** Starts a manual backup, asking what "now" means when nothing has been backed up before. */
+private fun startBackup(
+    needsScope: Boolean,
+    onBackUpNow: (Boolean?) -> Unit,
+    ask: () -> Unit
+) {
+    if (needsScope) ask() else onBackUpNow(null)
+}
+
 @Composable
 private fun EncryptedNotice() {
     Text(
@@ -992,7 +1001,9 @@ fun SettingsScreen(
     autoUploadWifiOnly: Boolean,
     backupStatus: String,
     backupLastRunAt: Long,
+    backupNeedsScope: Boolean,
     onAutoUpload: (Boolean, Boolean) -> Unit,
+    onBackUpNow: (Boolean?) -> Unit,
     onAutoUploadWifiOnly: (Boolean) -> Unit,
     onOpenRepo: () -> Unit,
     onSignOut: () -> Unit,
@@ -1000,6 +1011,8 @@ fun SettingsScreen(
 ) {
     var confirmSignOut by remember { mutableStateOf(false) }
     var askScope by remember { mutableStateOf(false) }
+    // Which action the permission prompt was for: turning the schedule on, or one run now.
+    var pendingManual by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) { onRefreshStorageUsed() }
@@ -1009,7 +1022,8 @@ fun SettingsScreen(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
         if (AutoUpload.canReadGallery(context)) {
-            askScope = true
+            if (pendingManual) startBackup(backupNeedsScope, onBackUpNow) { askScope = true }
+            else askScope = true
         } else {
             Toast.makeText(
                 context,
@@ -1097,6 +1111,21 @@ fun SettingsScreen(
                     )
                 }
             )
+            ListItem(
+                headlineContent = { Text("Back up now") },
+                supportingContent = {
+                    Text("Runs straight away on whatever connection you are on.")
+                },
+                leadingContent = { Icon(Icons.Filled.CloudUpload, contentDescription = null) },
+                modifier = Modifier.clickable {
+                    pendingManual = true
+                    if (AutoUpload.canReadGallery(context)) {
+                        startBackup(backupNeedsScope, onBackUpNow) { askScope = true }
+                    } else {
+                        askForGallery.launch(AutoUpload.mediaPermissions())
+                    }
+                }
+            )
             if (autoUpload) {
                 ListItem(
                     headlineContent = { Text("Only on Wi-Fi") },
@@ -1150,14 +1179,18 @@ fun SettingsScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = { askScope = false; onAutoUpload(true, true) }) {
-                    Text("Everything")
-                }
+                TextButton(onClick = {
+                    askScope = false
+                    if (pendingManual) onBackUpNow(true) else onAutoUpload(true, true)
+                    pendingManual = false
+                }) { Text("Everything") }
             },
             dismissButton = {
-                TextButton(onClick = { askScope = false; onAutoUpload(true, false) }) {
-                    Text("New photos only")
-                }
+                TextButton(onClick = {
+                    askScope = false
+                    if (pendingManual) onBackUpNow(false) else onAutoUpload(true, false)
+                    pendingManual = false
+                }) { Text("New photos only") }
             }
         )
     }

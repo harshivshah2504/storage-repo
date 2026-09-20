@@ -21,6 +21,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.harshiv.githubdrive.GdApp
 import com.harshiv.githubdrive.MainActivity
 import com.harshiv.githubdrive.R
@@ -57,6 +58,9 @@ object AutoUpload {
 
     private const val NOTIFICATION_ID = 4211
 
+    /** Marks a run somebody asked for, which ignores the on/off setting. */
+    const val INPUT_MANUAL = "manual"
+
     /**
      * Puts the nightly run in the calendar. Safe to call repeatedly.
      *
@@ -89,6 +93,33 @@ object AutoUpload {
 
         val request = OneTimeWorkRequestBuilder<Worker>()
             .setConstraints(constraints(prefs.autoUploadWifiOnly))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+            .build()
+
+        WorkManager.getInstance(app)
+            .enqueueUniqueWork(WORK_NAME_NOW, ExistingWorkPolicy.REPLACE, request)
+    }
+
+    /**
+     * Backs up now because somebody asked, rather than because it is midnight.
+     *
+     * Runs whether or not the nightly backup is switched on - a one-off should not require
+     * turning on a schedule - and on whatever connection is to hand. Waiting for Wi-Fi would be
+     * the safer default, but someone who taps a button and watches nothing happen has every
+     * reason to think the thing is broken.
+     */
+    fun backUpNow(context: Context) {
+        val app = context.applicationContext
+        val prefs = (app as GdApp).prefs
+        if (!prefs.isSignedIn) return
+
+        val request = OneTimeWorkRequestBuilder<Worker>()
+            .setInputData(workDataOf(INPUT_MANUAL to true))
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build()
+            )
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
             .build()
 
@@ -168,13 +199,20 @@ object AutoUpload {
             val app = applicationContext as GdApp
             val prefs = app.prefs
 
-            if (!prefs.autoUpload) return Result.success()
-            if (!canReadGallery(applicationContext)) return Result.success()
+            val manual = inputData.getBoolean(INPUT_MANUAL, false)
+            if (!manual && !prefs.autoUpload) return Result.success()
+            if (!canReadGallery(applicationContext)) {
+                if (manual) note(prefs, "Needs permission to read your gallery", 0)
+                return Result.success()
+            }
             val token = prefs.token ?: return Result.success()
             val owner = prefs.repoOwner ?: return Result.success()
 
             val pending = newMedia(prefs.autoUploadSince, prefs.autoUploadLastId)
-            if (pending.isEmpty()) return Result.success()
+            if (pending.isEmpty()) {
+                if (manual) note(prefs, "Nothing new to back up", 0)
+                return Result.success()
+            }
 
             // A backup is a long upload, and a plain background worker is stopped after ten
             // minutes. Running in the foreground buys the time one large video needs.

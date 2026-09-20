@@ -237,6 +237,8 @@ private fun AppRoot(pendingShareCount: Int, takeSharedUris: () -> List<Uri>) {
             autoUploadWifiOnly = vm.autoUploadWifiOnly,
             backupStatus = vm.backupStatus,
             backupLastRunAt = vm.backupLastRunAt,
+            backupNeedsScope = vm.backupNeedsScope,
+            onBackUpNow = { everything -> vm.backUpNow(everything) },
             onAutoUpload = { on, everything -> vm.backUpGallery(on, everything) },
             onAutoUploadWifiOnly = { vm.backUpOnWifiOnly(it) },
             onOpenRepo = {
